@@ -87,7 +87,7 @@ goals in the near term.
 
 To quickly set up the complete environment:
 
-1. Make sure you have [Go](https://go.dev/doc/install), [`kubectl`](https://kubernetes.io/docs/tasks/tools/), and [`docker`](https://www.docker.com/) installed and configured on your dev machine. We will automatically manage other dependencies via Go, including [`kind`](https://kind.sigs.k8s.io/).
+1. Make sure you have [Go](https://go.dev/doc/install), [`kubectl`](https://kubernetes.io/docs/tasks/tools/), and [`docker`](https://www.docker.com/) installed and configured on your dev machine. We will automatically manage other dependencies via Go, including [`kind`](https://kind.sigs.k8s.io/). On Docker Desktop, allocate at least **12 GiB of memory** to the Docker VM (Settings → Resources → Memory) — the full bring-up otherwise OOMs.
 
 2. Run the following steps:
 ```shell

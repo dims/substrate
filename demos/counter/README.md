@@ -6,9 +6,20 @@ It deploys a simple Go HTTP server (`counter.go`) that increments a counter on e
 
 ## Prerequisites
 
-- A k8s cluster with Agent Substrate installed (`./hack/install-ate.sh --deploy-ate-system`).
+- A Kubernetes cluster with Agent Substrate installed.
 - `ko` installed for building images.
-- A GCS bucket for storing snapshots (configured via `BUCKET_NAME` env var).
+- A snapshot store appropriate to the cluster:
+  - On GKE, a GCS bucket whose name is supplied via the `BUCKET_NAME` environment variable.
+  - On a local `kind` cluster, the in-cluster `rustfs` S3-compatible store provisioned by the kind overlay. `BUCKET_NAME` defaults to `ate-snapshots` and does not need to be set.
+
+Two install scripts are available and accept the same flag set:
+
+| Target | Script |
+|---|---|
+| GKE | `./hack/install-ate.sh` |
+| Local `kind` | `./hack/install-ate-kind.sh` |
+
+The remainder of this guide uses `./hack/install-ate.sh`. For a `kind` cluster, substitute `./hack/install-ate-kind.sh` in every command below. The end-to-end `kind` bring-up is described in the [Quickstart in the top-level README](../../README.md#quickstart-development).
 
 ## How to Run on Agent Substrate
 
