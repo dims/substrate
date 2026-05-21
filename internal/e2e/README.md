@@ -18,7 +18,10 @@ $ go test -v ./internal/e2e/suites/... -args -e2e
 
 ## Preconditions
 
-The e2e tests assume you have a cluster setup with `hack/install.sh`.
+The e2e tests assume a cluster has been provisioned with one of the install scripts:
+
+- `hack/install-ate.sh --deploy-ate-system` for a GKE-based environment (requires `.ate-dev-env.sh`; see the top-level [README](../../README.md#gke-quickstart-development)).
+- `hack/install-ate-kind.sh --deploy-ate-system` for a local `kind` cluster (see the top-level [README](../../README.md#quickstart-development)).
 
 ## Creating a new test suite
 
