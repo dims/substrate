@@ -42,6 +42,7 @@ const (
 	Control_DeleteActor_FullMethodName  = "/ateapi.Control/DeleteActor"
 	Control_ListWorkers_FullMethodName  = "/ateapi.Control/ListWorkers"
 	Control_ListActors_FullMethodName   = "/ateapi.Control/ListActors"
+	Control_WatchActors_FullMethodName  = "/ateapi.Control/WatchActors"
 	Control_DebugClear_FullMethodName   = "/ateapi.Control/DebugClear"
 )
 
@@ -65,6 +66,15 @@ type ControlClient interface {
 	ListWorkers(ctx context.Context, in *ListWorkersRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error)
 	// List all actors currently reflected in redis.
 	ListActors(ctx context.Context, in *ListActorsRequest, opts ...grpc.CallOption) (*ListActorsResponse, error)
+	// Watch actor lifecycle events. The server sends an initial
+	// `Upsert` for every actor matching the filter, then streams
+	// subsequent transitions (status changes, worker reassignments,
+	// deletions) as they happen.
+	//
+	// The stream stays open indefinitely. Callers should reconnect
+	// (with `since_version` from the highest version they've seen) on
+	// any error, including transient network failures.
+	WatchActors(ctx context.Context, in *WatchActorsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ActorEvent], error)
 	// Debugging: drop all data from the ate database.
 	DebugClear(ctx context.Context, in *DebugClearRequest, opts ...grpc.CallOption) (*DebugClearResponse, error)
 }
@@ -147,6 +157,25 @@ func (c *controlClient) ListActors(ctx context.Context, in *ListActorsRequest, o
 	return out, nil
 }
 
+func (c *controlClient) WatchActors(ctx context.Context, in *WatchActorsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ActorEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Control_ServiceDesc.Streams[0], Control_WatchActors_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchActorsRequest, ActorEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Control_WatchActorsClient = grpc.ServerStreamingClient[ActorEvent]
+
 func (c *controlClient) DebugClear(ctx context.Context, in *DebugClearRequest, opts ...grpc.CallOption) (*DebugClearResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DebugClearResponse)
@@ -177,6 +206,15 @@ type ControlServer interface {
 	ListWorkers(context.Context, *ListWorkersRequest) (*ListWorkersResponse, error)
 	// List all actors currently reflected in redis.
 	ListActors(context.Context, *ListActorsRequest) (*ListActorsResponse, error)
+	// Watch actor lifecycle events. The server sends an initial
+	// `Upsert` for every actor matching the filter, then streams
+	// subsequent transitions (status changes, worker reassignments,
+	// deletions) as they happen.
+	//
+	// The stream stays open indefinitely. Callers should reconnect
+	// (with `since_version` from the highest version they've seen) on
+	// any error, including transient network failures.
+	WatchActors(*WatchActorsRequest, grpc.ServerStreamingServer[ActorEvent]) error
 	// Debugging: drop all data from the ate database.
 	DebugClear(context.Context, *DebugClearRequest) (*DebugClearResponse, error)
 	mustEmbedUnimplementedControlServer()
@@ -209,6 +247,9 @@ func (UnimplementedControlServer) ListWorkers(context.Context, *ListWorkersReque
 }
 func (UnimplementedControlServer) ListActors(context.Context, *ListActorsRequest) (*ListActorsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListActors not implemented")
+}
+func (UnimplementedControlServer) WatchActors(*WatchActorsRequest, grpc.ServerStreamingServer[ActorEvent]) error {
+	return status.Error(codes.Unimplemented, "method WatchActors not implemented")
 }
 func (UnimplementedControlServer) DebugClear(context.Context, *DebugClearRequest) (*DebugClearResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DebugClear not implemented")
@@ -360,6 +401,17 @@ func _Control_ListActors_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Control_WatchActors_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchActorsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ControlServer).WatchActors(m, &grpc.GenericServerStream[WatchActorsRequest, ActorEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Control_WatchActorsServer = grpc.ServerStreamingServer[ActorEvent]
+
 func _Control_DebugClear_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DebugClearRequest)
 	if err := dec(in); err != nil {
@@ -418,7 +470,13 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Control_DebugClear_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "WatchActors",
+			Handler:       _Control_WatchActors_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "ateapi.proto",
 }
 

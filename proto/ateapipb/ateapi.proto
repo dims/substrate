@@ -44,6 +44,16 @@ service Control {
   // List all actors currently reflected in redis.
   rpc ListActors(ListActorsRequest) returns (ListActorsResponse) {}
 
+  // Watch actor lifecycle events. The server sends an initial
+  // `Upsert` for every actor matching the filter, then streams
+  // subsequent transitions (status changes, worker reassignments,
+  // deletions) as they happen.
+  //
+  // The stream stays open indefinitely. Callers should reconnect
+  // (with `since_version` from the highest version they've seen) on
+  // any error, including transient network failures.
+  rpc WatchActors(WatchActorsRequest) returns (stream ActorEvent) {}
+
   // Debugging: drop all data from the ate database.
   rpc DebugClear(DebugClearRequest) returns (DebugClearResponse) {}
 }
@@ -131,6 +141,29 @@ message ListActorsRequest {}
 
 message ListActorsResponse {
   repeated Actor actors = 1;
+}
+
+// WatchActorsRequest filters which actor stream the server emits to
+// this client. Empty filters mean "everything".
+message WatchActorsRequest {
+  // Restrict the stream to actors whose `ActorTemplate` lives in this
+  // namespace. Empty means no namespace filter.
+  string actor_template_namespace = 1;
+
+  // Resume the stream from this monotonic actor `version`. The server
+  // re-emits every actor whose current version is greater. Zero
+  // (default) requests a fresh bootstrap.
+  int64 since_version = 2;
+}
+
+// ActorEvent is one item on the WatchActors stream. Either the server
+// observed a new or updated actor (Upsert) or an actor was removed
+// from the catalog (Deleted).
+message ActorEvent {
+  oneof payload {
+    Actor upsert = 1;
+    string deleted_actor_id = 2;
+  }
 }
 
 message Worker {
