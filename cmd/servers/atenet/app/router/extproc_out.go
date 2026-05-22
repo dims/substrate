@@ -43,6 +43,21 @@ func addAuthorityMutation(auth string, mut *extprocv3.HeaderMutation) {
 	)
 }
 
+// sessionHeader is set on every successfully-routed request so that the
+// workload can identify its own actor without parsing the rewritten :authority.
+const sessionHeader = "x-agentset-session"
+
+func addSessionHeaderMutation(actorID string, mut *extprocv3.HeaderMutation) {
+	mut.SetHeaders = append(mut.SetHeaders,
+		&corev3.HeaderValueOption{
+			Header: &corev3.HeaderValue{
+				Key:      sessionHeader,
+				RawValue: []byte(actorID),
+			},
+		},
+	)
+}
+
 func immediateResponse(statusCode envoy_type.StatusCode, message string) *extproc.ProcessingResponse {
 	return &extproc.ProcessingResponse{
 		Response: &extproc.ProcessingResponse_ImmediateResponse{

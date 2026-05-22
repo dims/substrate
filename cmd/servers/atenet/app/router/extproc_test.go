@@ -131,17 +131,20 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 			}
 
 			mutation := res.Response.GetHeaderMutation()
-			if len(mutation.GetSetHeaders()) != 1 {
-				t.Fatalf("expected exactly one Header option set, found: %v", mutation.GetSetHeaders())
+			if len(mutation.GetSetHeaders()) != 2 {
+				t.Fatalf("expected exactly two Header options set, found: %v", mutation.GetSetHeaders())
 			}
 
-			headerOption := mutation.GetSetHeaders()[0]
-			if strings.ToLower(headerOption.Header.Key) != ":authority" {
-				t.Errorf("invalid resulting dynamic parameter key: %s", headerOption.Header.Key)
+			setHeaders := map[string]string{}
+			for _, h := range mutation.GetSetHeaders() {
+				setHeaders[strings.ToLower(h.Header.Key)] = string(h.Header.RawValue)
 			}
 
-			if string(headerOption.Header.RawValue) != tc.expectedTarget {
-				t.Errorf("invalid destination mapping found: %s, expected: %s", headerOption.Header.RawValue, tc.expectedTarget)
+			if got := setHeaders[":authority"]; got != tc.expectedTarget {
+				t.Errorf("invalid :authority mutation: got %q, want %q", got, tc.expectedTarget)
+			}
+			if got := setHeaders["x-agentset-session"]; got != testUUID {
+				t.Errorf("invalid x-agentset-session mutation: got %q, want %q", got, testUUID)
 			}
 
 			// Confirm that query logs recorded metric trace details

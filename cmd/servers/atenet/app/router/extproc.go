@@ -150,9 +150,11 @@ func (s *ExtProcServer) handleRequestHeaders(
 
 	slog.InfoContext(ctx, "Route ok", slog.String("actorID", actorID), slog.String("targetAddr", targetAddr))
 
-	// Route by rewriting the :authority header.
+	// Route by rewriting the :authority header, and inject the resolved actor
+	// ID so the workload can identify itself without inspecting :authority.
 	mutation := &extprocv3.HeaderMutation{}
 	addAuthorityMutation(targetAddr, mutation)
+	addSessionHeaderMutation(actorID, mutation)
 
 	return &extprocv3.HeadersResponse{
 		Response: &extprocv3.CommonResponse{
