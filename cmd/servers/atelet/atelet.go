@@ -393,7 +393,9 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (*atele
 
 	g, gCtx := errgroup.WithContext(ctx)
 
-	// Pull pause container and assemble OCI bundle
+	// Pull pause container and assemble OCI bundle. The pause container
+	// never carries the workload's SecurityContext -- it is the runsc
+	// supervisor process and keeps the unconditional default cap set.
 	g.Go(func() error {
 		if err := prepareOCIDirectory(
 			gCtx,
@@ -404,6 +406,7 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (*atele
 			"pause",
 			req.GetSpec().GetPauseImage(),
 			[]string{"/pause"},
+			nil,
 			nil,
 			map[string]string{
 				"io.kubernetes.cri.container-type": "sandbox",
@@ -423,6 +426,12 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (*atele
 		for _, env := range ctr.GetEnv() {
 			envs = append(envs, fmt.Sprintf("%s=%s", env.GetName(), env.GetValue()))
 		}
+		var capAdds []string
+		if sc := ctr.GetSecurityContext(); sc != nil {
+			if caps := sc.GetCapabilities(); caps != nil {
+				capAdds = caps.GetAdd()
+			}
+		}
 
 		g.Go(func() error {
 			if err := prepareOCIDirectory(
@@ -435,6 +444,7 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (*atele
 				ctr.GetImage(),
 				ctr.GetCommand(),
 				envs,
+				capAdds,
 				map[string]string{
 					"io.kubernetes.cri.container-type": "container",
 					"io.kubernetes.cri.sandbox-id":     "pause",
@@ -642,7 +652,9 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 
 	g, gCtx = errgroup.WithContext(ctx)
 
-	// Pull pause container and assemble OCI bundle
+	// Pull pause container and assemble OCI bundle. The pause container
+	// never carries the workload's SecurityContext -- it is the runsc
+	// supervisor process and keeps the unconditional default cap set.
 	g.Go(func() error {
 		if err := prepareOCIDirectory(
 			gCtx,
@@ -653,6 +665,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 			"pause",
 			req.GetSpec().GetPauseImage(),
 			[]string{"/pause"},
+			nil,
 			nil,
 			map[string]string{
 				"io.kubernetes.cri.container-type": "sandbox",
@@ -672,6 +685,12 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		for _, env := range ctr.GetEnv() {
 			envs = append(envs, fmt.Sprintf("%s=%s", env.GetName(), env.GetValue()))
 		}
+		var capAdds []string
+		if sc := ctr.GetSecurityContext(); sc != nil {
+			if caps := sc.GetCapabilities(); caps != nil {
+				capAdds = caps.GetAdd()
+			}
+		}
 
 		g.Go(func() error {
 			if err := prepareOCIDirectory(
@@ -684,6 +703,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 				ctr.GetImage(),
 				ctr.GetCommand(),
 				envs,
+				capAdds,
 				map[string]string{
 					"io.kubernetes.cri.container-type": "container",
 					"io.kubernetes.cri.sandbox-id":     "pause",

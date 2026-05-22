@@ -25,6 +25,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/memorypullcache"
@@ -33,7 +34,46 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryPullCache, actorTemplateNamespace, actorTemplateName, actorID, containerName, ref string, args []string, env []string, annotations map[string]string, netns string) error {
+// defaultSandboxCapabilities is the minimum set every workload receives.
+// Templates can request additional caps via `Container.SecurityContext.Capabilities.Add`.
+var defaultSandboxCapabilities = []string{
+	"CAP_AUDIT_WRITE",
+	"CAP_KILL",
+	"CAP_NET_BIND_SERVICE",
+}
+
+// resolveCapabilities returns the union of the default sandbox set and any
+// caller-requested adds, normalizing each name to its `CAP_*` form. Unknown
+// names are passed through unchanged so the OCI runtime is the single
+// authority for validating them.
+func resolveCapabilities(adds []string) []string {
+	if len(adds) == 0 {
+		out := make([]string, len(defaultSandboxCapabilities))
+		copy(out, defaultSandboxCapabilities)
+		return out
+	}
+	seen := make(map[string]struct{}, len(defaultSandboxCapabilities)+len(adds))
+	out := make([]string, 0, len(defaultSandboxCapabilities)+len(adds))
+	add := func(name string) {
+		if !strings.HasPrefix(name, "CAP_") {
+			name = "CAP_" + name
+		}
+		if _, dup := seen[name]; dup {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	for _, c := range defaultSandboxCapabilities {
+		add(c)
+	}
+	for _, c := range adds {
+		add(c)
+	}
+	return out
+}
+
+func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryPullCache, actorTemplateNamespace, actorTemplateName, actorID, containerName, ref string, args []string, env []string, capabilityAdds []string, annotations map[string]string, netns string) error {
 	tracer := otel.Tracer("prepareOCIDirectory")
 
 	ctx, span := tracer.Start(ctx, "prepareOCIDirectory")
@@ -66,6 +106,7 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
 	}
 	envVars = append(envVars, env...)
 
+	caps := resolveCapabilities(capabilityAdds)
 	ociSpec := &specs.Spec{
 		Process: &specs.Process{
 			User: specs.User{
@@ -76,26 +117,10 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
 			Env:  envVars,
 			Cwd:  "/",
 			Capabilities: &specs.LinuxCapabilities{
-				Bounding: []string{
-					"CAP_AUDIT_WRITE",
-					"CAP_KILL",
-					"CAP_NET_BIND_SERVICE",
-				},
-				Effective: []string{
-					"CAP_AUDIT_WRITE",
-					"CAP_KILL",
-					"CAP_NET_BIND_SERVICE",
-				},
-				Inheritable: []string{
-					"CAP_AUDIT_WRITE",
-					"CAP_KILL",
-					"CAP_NET_BIND_SERVICE",
-				},
-				Permitted: []string{
-					"CAP_AUDIT_WRITE",
-					"CAP_KILL",
-					"CAP_NET_BIND_SERVICE",
-				},
+				Bounding:    append([]string(nil), caps...),
+				Effective:   append([]string(nil), caps...),
+				Inheritable: append([]string(nil), caps...),
+				Permitted:   append([]string(nil), caps...),
 				// TODO(gvisor.dev/issue/3166): support ambient capabilities
 			},
 			Rlimits: []specs.POSIXRlimit{

@@ -49,6 +49,52 @@ type Container struct {
 
 	// Environment variables to set in the worker replicas.
 	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// SecurityContext holds Substrate-honored security settings for the
+	// container. Workloads such as NVIDIA OpenShell's `openshell-sandbox`
+	// supervisor require additional capabilities (`CAP_NET_ADMIN`,
+	// `CAP_SETUID`, `CAP_SETGID`) on top of the small default set
+	// (`CAP_AUDIT_WRITE`, `CAP_KILL`, `CAP_NET_BIND_SERVICE`). Setting
+	// this is opt-in per container.
+	//
+	// Only `Capabilities.Add` is honored today; `Drop` is reserved for a
+	// follow-up that introduces a per-template default allow-list.
+	//
+	// +optional
+	SecurityContext *ContainerSecurityContext `json:"securityContext,omitempty"`
+}
+
+// ContainerSecurityContext is the Substrate subset of K8s `SecurityContext`.
+//
+// Substrate intentionally does not expose the full K8s shape because gVisor
+// implements user/group/MAC primitives differently from the host kernel and
+// because the actor lifecycle (checkpoint/restore) constrains what
+// security-state can be mutated across the snapshot boundary. Fields here
+// are the ones atelet's OCI bundle builder can honor without violating
+// either constraint.
+type ContainerSecurityContext struct {
+	// Capabilities adjustments applied on top of the default sandbox set.
+	// +optional
+	Capabilities *Capabilities `json:"capabilities,omitempty"`
+}
+
+// Capabilities mirrors `corev1.Capabilities` but with the field types
+// kept primitive so the same shape can be carried verbatim through the
+// `ateletpb` / `ateompb` protos without an additional conversion layer.
+type Capabilities struct {
+	// Capabilities to grant in addition to the default set. Each entry
+	// is a Linux capability name with or without the `CAP_` prefix
+	// (e.g. `NET_ADMIN` or `CAP_NET_ADMIN`).
+	// +optional
+	// +listType=atomic
+	Add []string `json:"add,omitempty"`
+
+	// Capabilities to drop from the default set. Currently unused; the
+	// default set is small enough that drops do not change behavior.
+	// Reserved for a per-template default allow-list.
+	// +optional
+	// +listType=atomic
+	Drop []string `json:"drop,omitempty"`
 }
 
 type SnapshotsConfig struct {

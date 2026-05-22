@@ -160,6 +160,14 @@ func (s *CallAteletSuspendStep) Execute(ctx context.Context, input *SuspendInput
 			}
 			ateletCtr.Env = append(ateletCtr.Env, ateletEnv)
 		}
+		if ctr.SecurityContext != nil && ctr.SecurityContext.Capabilities != nil {
+			ateletCtr.SecurityContext = &ateletpb.SecurityContext{
+				Capabilities: &ateletpb.Capabilities{
+					Add:  ctr.SecurityContext.Capabilities.Add,
+					Drop: ctr.SecurityContext.Capabilities.Drop,
+				},
+			}
+		}
 		req.Spec.Containers = append(req.Spec.Containers, ateletCtr)
 	}
 	_, err = client.Checkpoint(ctx, req)

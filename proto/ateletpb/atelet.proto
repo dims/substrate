@@ -77,15 +77,31 @@ message WorkloadSpec {
 }
 
 message Container {
-  string            name    = 1;
-  string            image   = 2;
-  repeated string   command = 3;
-  repeated EnvEntry env     = 4;
+  string            name             = 1;
+  string            image            = 2;
+  repeated string   command          = 3;
+  repeated EnvEntry env              = 4;
+  SecurityContext   security_context = 5;
 }
 
 message EnvEntry {
   string name  = 1;
   string value = 2;
+}
+
+// SecurityContext mirrors `api/v1alpha1.ContainerSecurityContext` over the
+// wire. Only `Capabilities.Add` is honored by atelet's OCI bundle builder
+// today.
+message SecurityContext {
+  Capabilities capabilities = 1;
+}
+
+// Capabilities mirrors `api/v1alpha1.Capabilities`. Each `add`/`drop` entry
+// is a Linux capability name with or without the `CAP_` prefix
+// (e.g. `NET_ADMIN` or `CAP_NET_ADMIN`).
+message Capabilities {
+  repeated string add  = 1;
+  repeated string drop = 2;
 }
 
 message RunResponse {
