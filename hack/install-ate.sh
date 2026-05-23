@@ -69,6 +69,7 @@ function usage() {
   echo "  --deploy-atelet                        Deploy atelet only"
   echo "  --deploy-ate-apiserver                 Deploy ate-api-server only"
   echo "  --deploy-atenet                        Deploy atenet only"
+  echo "  --publish-ateom-image                  Build + push ateom-gvisor (kind only); writes digest to .ate-kind/ateom-image"
   echo ""
   echo "To create individual resources used by ate-system (Note: These are"
   echo "called automatically by --deploy-ate-system):"
@@ -245,6 +246,32 @@ deploy_ate_system() {
   run_kubectl rollout status deployment/atenet-router -n ate-system --timeout=120s
   run_kubectl rollout status statefulset/valkey-cluster -n ate-system --timeout=120s
   run_kubectl rollout status daemonset/atelet -n ate-system --timeout=120s
+
+  publish_ateom_image
+}
+
+# Build + push the ateom-gvisor image and persist its digest under
+# .ate-kind/ateom-image. ateom-gvisor is the per-worker-pod sidecar
+# referenced via WorkerPool.spec.ateomImage; it has no Deployment
+# manifest under manifests/ate-install/, so the ko-resolve pipeline that
+# builds every other binary never touches it. Without this step,
+# operators creating a WorkerPool after a fresh --deploy-ate-system have
+# to invoke ko publish by hand.
+#
+# Only runs in kind mode; non-kind installs continue to manage their own
+# image-publishing flow against the cluster's registry.
+publish_ateom_image() {
+  if [[ "${ATE_INSTALL_KIND:-false}" != "true" ]]; then
+    return 0
+  fi
+  log_step "publish_ateom_image"
+  local out_dir="${ROOT}/.ate-kind"
+  mkdir -p "${out_dir}"
+  local image
+  image=$("${ROOT}/hack/run-tool.sh" ko publish --base-import-paths ./cmd/ateom-gvisor)
+  echo "${image}" > "${out_dir}/ateom-image"
+  echo "  image:  ${image}"
+  echo "  digest: ${out_dir}/ateom-image"
 }
 
 # Ensure secrets and configmaps required by ate-apiserver
@@ -375,6 +402,8 @@ while [[ "$#" -gt 0 ]]; do
 
     --deploy-atenet) deploy_atenet ;;
     --delete-atenet) delete_atenet ;;
+
+    --publish-ateom-image) publish_ateom_image ;;
 
     --create-jwt-authority-pool-secret) create_jwt_authority_pool_secret ;;
     --create-session-id-ca-pool-secret) create_session_id_ca_pool_secret ;;
