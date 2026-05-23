@@ -163,7 +163,80 @@ func NewService(interiorNetNS netns.NsHandle, eth0LinkInfo *SaveLinkInfo, actorL
 	return svc
 }
 
-func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkloadRequest) (*ateompb.RunWorkloadResponse, error) {
+// rescueEth0FromInteriorIfStuck checks whether `eth0` is missing from
+// the pod's network namespace and, if so, looks for it in the
+// interior gVisor netns and moves it back. This makes the per-actor
+// `eth0` move idempotent against partial Run/Restore failures: when a
+// prior `RunWorkload` or `RestoreWorkload` moved `eth0` into the
+// interior netns and then errored before moving it back, this
+// recovers the link so the next attempt is not bricked with
+// "Link not found".
+//
+// Idempotent and best-effort: if `eth0` is already in the pod netns
+// or absent everywhere, the function returns nil with no side
+// effects.
+func rescueEth0FromInteriorIfStuck(ctx context.Context, s *AteomService) error {
+	// Fast path: eth0 is in the pod netns where Run/Restore expect it.
+	if _, err := netlink.LinkByName("eth0"); err == nil {
+		return nil
+	}
+
+	// Capture the pod netns handle before switching threads.
+	podNetNS, err := netns.Get()
+	if err != nil {
+		return fmt.Errorf("while getting pod netns for rescue: %w", err)
+	}
+
+	var rescued bool
+	err = netNSDo(ctx, s.interiorNetNS, func(_ context.Context) error {
+		link, lookupErr := netlink.LinkByName("eth0")
+		if lookupErr != nil {
+			// Not in interior either; original "Link not found" stands.
+			return nil
+		}
+		if mvErr := netlink.LinkSetNsFd(link, int(podNetNS)); mvErr != nil {
+			return fmt.Errorf("while moving stuck eth0 back to pod netns: %w", mvErr)
+		}
+		rescued = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if rescued {
+		slog.WarnContext(ctx, "Rescued eth0 from interior netns; prior Run/Restore likely failed mid-flight")
+	}
+	return nil
+}
+
+// moveEth0BackToPodNetns is the cleanup half of the Run/Restore eth0
+// dance. It is invoked from a deferred cleanup when the RPC returns
+// an error AFTER `eth0` was moved into the interior netns. Without
+// it, eth0 stays stuck and bricks the worker pod for subsequent
+// actors.
+//
+// Best-effort and idempotent: silently returns nil if `eth0` is not
+// in the interior netns (e.g. the move never happened).
+func moveEth0BackToPodNetns(ctx context.Context, s *AteomService) error {
+	podNetNS, err := netns.Get()
+	if err != nil {
+		return fmt.Errorf("while getting pod netns for rollback: %w", err)
+	}
+	return netNSDo(ctx, s.interiorNetNS, func(_ context.Context) error {
+		link, lookupErr := netlink.LinkByName("eth0")
+		if lookupErr != nil {
+			// Not stuck in interior; nothing to roll back.
+			return nil
+		}
+		if mvErr := netlink.LinkSetNsFd(link, int(podNetNS)); mvErr != nil {
+			return fmt.Errorf("while moving eth0 back to pod netns during rollback: %w", mvErr)
+		}
+		slog.InfoContext(ctx, "Rolled eth0 back to pod netns after Run/Restore failure")
+		return nil
+	})
+}
+
+func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkloadRequest) (resp *ateompb.RunWorkloadResponse, retErr error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -174,6 +247,14 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	//   * Correct runsc version is downloaded and placed on disk.
 	//   * All OCI bundles are set up, including for "pause" container.
 
+	// Rescue eth0 if a prior failed Run/Restore left it stuck in the
+	// interior netns. Without this, the worker pod is permanently
+	// bricked for fresh actor creation after the first partial
+	// failure.
+	if err := rescueEth0FromInteriorIfStuck(ctx, s); err != nil {
+		return nil, fmt.Errorf("while rescuing stuck eth0: %w", err)
+	}
+
 	// Move pod eth0 into interior netns
 	eth0Link, err := netlink.LinkByName("eth0")
 	if err != nil {
@@ -182,6 +263,17 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	if err := netlink.LinkSetNsFd(eth0Link, int(s.interiorNetNS)); err != nil {
 		return nil, fmt.Errorf("while moving eth0 into interior network namespace: %w", err)
 	}
+	// From here forward, eth0 is in the interior netns. Any error
+	// return MUST move it back so the worker pod stays usable for
+	// the next actor. Without this rollback, partial Run failures
+	// brick the pod with "Link not found" on subsequent calls.
+	defer func() {
+		if retErr != nil {
+			if cleanupErr := moveEth0BackToPodNetns(ctx, s); cleanupErr != nil {
+				slog.WarnContext(ctx, "Failed to roll back eth0 after Run failure", "err", cleanupErr)
+			}
+		}
+	}()
 
 	slog.InfoContext(ctx, "Restoring eth0 routes/addresses in interior netns")
 	err = netNSDo(ctx, s.interiorNetNS, func(ctx context.Context) error {
@@ -324,7 +416,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	return nil, nil
 }
 
-func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.RestoreWorkloadRequest) (*ateompb.RestoreWorkloadResponse, error) {
+func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.RestoreWorkloadRequest) (resp *ateompb.RestoreWorkloadResponse, retErr error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -336,6 +428,12 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	//   * All OCI bundles are set up, including for "pause" container.
 	//   * Checkpoint downloaded and placed on disk
 
+	// Rescue eth0 if a prior failed Run/Restore left it stuck in the
+	// interior netns.
+	if err := rescueEth0FromInteriorIfStuck(ctx, s); err != nil {
+		return nil, fmt.Errorf("while rescuing stuck eth0: %w", err)
+	}
+
 	// Move pod eth0 into interior netns
 	eth0Link, err := netlink.LinkByName("eth0")
 	if err != nil {
@@ -344,6 +442,14 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	if err := netlink.LinkSetNsFd(eth0Link, int(s.interiorNetNS)); err != nil {
 		return nil, fmt.Errorf("while moving eth0 into interior network namespace: %w", err)
 	}
+	// Roll back eth0 to the pod netns if any subsequent step fails.
+	defer func() {
+		if retErr != nil {
+			if cleanupErr := moveEth0BackToPodNetns(ctx, s); cleanupErr != nil {
+				slog.WarnContext(ctx, "Failed to roll back eth0 after Restore failure", "err", cleanupErr)
+			}
+		}
+	}()
 
 	// Restore route and IP information from save onto eth0.
 	slog.InfoContext(ctx, "Restoring eth0 routes/addresses in interior netns")
