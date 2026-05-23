@@ -47,3 +47,6 @@ Thumbs.db
 
 # Local worktrees
 /.worktrees/
+
+# Local install state (digests of locally-published images, etc.)
+.ate-kind/
