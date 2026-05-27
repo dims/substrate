@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -448,5 +449,60 @@ func TestUntar_TruncatedArchive(t *testing.T) {
 	if !strings.Contains(err.Error(), "in tarReader.Next") &&
 		!strings.Contains(err.Error(), "unexpected EOF") {
 		t.Errorf("error = %v, want it to surface the underlying tar/copy error", err)
+	}
+}
+
+func TestResolveCapabilities(t *testing.T) {
+	defaults := []string{"CAP_AUDIT_WRITE", "CAP_KILL", "CAP_NET_BIND_SERVICE"}
+
+	cases := []struct {
+		name string
+		adds []string
+		want []string
+	}{
+		{
+			name: "nil adds yields defaults only",
+			adds: nil,
+			want: defaults,
+		},
+		{
+			name: "empty adds yields defaults only",
+			adds: []string{},
+			want: defaults,
+		},
+		{
+			name: "prefix-less names normalised and appended",
+			adds: []string{"NET_ADMIN", "SETUID", "SETGID"},
+			want: append(append([]string{}, defaults...), "CAP_NET_ADMIN", "CAP_SETUID", "CAP_SETGID"),
+		},
+		{
+			name: "already-prefixed names accepted verbatim",
+			adds: []string{"CAP_NET_ADMIN"},
+			want: append(append([]string{}, defaults...), "CAP_NET_ADMIN"),
+		},
+		{
+			name: "lowercase normalised to uppercase",
+			adds: []string{"cap_net_admin", "setuid"},
+			want: append(append([]string{}, defaults...), "CAP_NET_ADMIN", "CAP_SETUID"),
+		},
+		{
+			name: "duplicates across defaults and adds collapse",
+			adds: []string{"CAP_KILL", "NET_ADMIN", "CAP_NET_ADMIN"},
+			want: append(append([]string{}, defaults...), "CAP_NET_ADMIN"),
+		},
+		{
+			name: "blank entries ignored",
+			adds: []string{"", "  ", "NET_ADMIN"},
+			want: append(append([]string{}, defaults...), "CAP_NET_ADMIN"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveCapabilities(tc.adds)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("resolveCapabilities(%v) = %v, want %v", tc.adds, got, tc.want)
+			}
+		})
 	}
 }

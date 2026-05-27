@@ -57,6 +57,56 @@ type Container struct {
 
 	// Environment variables to set in the worker replicas.
 	Env []EnvVar `json:"env,omitempty"`
+
+	// SecurityContext holds Substrate-honoured security settings for the
+	// container. Workloads that set up their own network or user
+	// namespaces — for example, a privileged supervisor that hands off to
+	// a less-privileged inner process — may require additional
+	// capabilities (such as `CAP_NET_ADMIN`, `CAP_SETUID`, `CAP_SETGID`)
+	// on top of the small default set (`CAP_AUDIT_WRITE`, `CAP_KILL`,
+	// `CAP_NET_BIND_SERVICE`). Opt-in per container.
+	//
+	// +optional
+	SecurityContext *ContainerSecurityContext `json:"securityContext,omitempty"`
+}
+
+// ContainerSecurityContext is the Substrate subset of K8s
+// `corev1.SecurityContext`. Substrate intentionally does not expose the
+// full K8s shape because gVisor implements user/group/MAC primitives
+// differently from the host kernel and because the actor lifecycle
+// (checkpoint/restore) constrains what security state can be mutated
+// across the snapshot boundary. Fields here are the ones atelet's OCI
+// bundle builder can honour without violating either constraint.
+type ContainerSecurityContext struct {
+	// Capabilities adjustments applied on top of the default sandbox set.
+	// +optional
+	Capabilities *Capabilities `json:"capabilities,omitempty"`
+
+	// RunAsUser is the UID to run the container's process as. Unset
+	// preserves atelet's default of root (UID 0). Workloads that drop
+	// privileges mid-startup (e.g. via setresuid) still need the
+	// matching `CAP_SETUID` in `Capabilities.Add`; this field is what
+	// makes the process *start* at the given UID instead.
+	// +optional
+	RunAsUser *int64 `json:"runAsUser,omitempty"`
+
+	// RunAsGroup is the GID to run the container's process as. Unset
+	// preserves atelet's default of root (GID 0). See `RunAsUser` for
+	// interaction with `Capabilities.Add` / `CAP_SETGID`.
+	// +optional
+	RunAsGroup *int64 `json:"runAsGroup,omitempty"`
+}
+
+// Capabilities mirrors `corev1.Capabilities` but keeps the field types
+// primitive so the same shape can ride the `ateletpb` / `ateompb` protos
+// verbatim without a conversion layer.
+type Capabilities struct {
+	// Capabilities to grant in addition to the default set. Each entry
+	// is a Linux capability name with or without the `CAP_` prefix
+	// (e.g. `NET_ADMIN` or `CAP_NET_ADMIN`).
+	// +optional
+	// +listType=atomic
+	Add []string `json:"add,omitempty"`
 }
 
 type SnapshotsConfig struct {
