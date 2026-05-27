@@ -187,6 +187,21 @@ func (s *CallAteletRestoreStep) Execute(ctx context.Context, input *ResumeInput,
 			}
 			ateletCtr.Env = append(ateletCtr.Env, ateletEnv)
 		}
+		if sc := ctr.SecurityContext; sc != nil {
+			pbsc := &ateletpb.SecurityContext{}
+			if sc.Capabilities != nil {
+				pbsc.Capabilities = &ateletpb.Capabilities{
+					Add: sc.Capabilities.Add,
+				}
+			}
+			if sc.RunAsUser != nil {
+				pbsc.RunAsUser = *sc.RunAsUser
+			}
+			if sc.RunAsGroup != nil {
+				pbsc.RunAsGroup = *sc.RunAsGroup
+			}
+			ateletCtr.SecurityContext = pbsc
+		}
 		workloadSpec.Containers = append(workloadSpec.Containers, ateletCtr)
 	}
 

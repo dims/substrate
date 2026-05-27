@@ -160,6 +160,21 @@ func (s *CallAteletSuspendStep) Execute(ctx context.Context, input *SuspendInput
 			}
 			ateletCtr.Env = append(ateletCtr.Env, ateletEnv)
 		}
+		if sc := ctr.SecurityContext; sc != nil {
+			pbsc := &ateletpb.SecurityContext{}
+			if sc.Capabilities != nil {
+				pbsc.Capabilities = &ateletpb.Capabilities{
+					Add: sc.Capabilities.Add,
+				}
+			}
+			if sc.RunAsUser != nil {
+				pbsc.RunAsUser = *sc.RunAsUser
+			}
+			if sc.RunAsGroup != nil {
+				pbsc.RunAsGroup = *sc.RunAsGroup
+			}
+			ateletCtr.SecurityContext = pbsc
+		}
 		req.Spec.Containers = append(req.Spec.Containers, ateletCtr)
 	}
 	_, err = client.Checkpoint(ctx, req)

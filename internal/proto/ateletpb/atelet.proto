@@ -77,15 +77,35 @@ message WorkloadSpec {
 }
 
 message Container {
-  string            name    = 1;
-  string            image   = 2;
-  repeated string   command = 3;
-  repeated EnvEntry env     = 4;
+  string            name             = 1;
+  string            image            = 2;
+  repeated string   command          = 3;
+  repeated EnvEntry env              = 4;
+  SecurityContext   security_context = 5;
 }
 
 message EnvEntry {
   string name  = 1;
   string value = 2;
+}
+
+// SecurityContext mirrors `pkg/api/v1alpha1.ContainerSecurityContext` over
+// the wire. Atelet's OCI bundle builder honours `Capabilities.Add`,
+// `run_as_user`, and `run_as_group`. The UID/GID fields are plain int64s
+// rather than `optional`: at the proto boundary "unset" and "0" both mean
+// root, which is identical to the atelet behaviour, so the extra
+// nullability buys nothing.
+message SecurityContext {
+  Capabilities capabilities  = 1;
+  int64        run_as_user   = 2;
+  int64        run_as_group  = 3;
+}
+
+// Capabilities mirrors `pkg/api/v1alpha1.Capabilities`. Each `add` entry
+// is a Linux capability name with or without the `CAP_` prefix
+// (e.g. `NET_ADMIN` or `CAP_NET_ADMIN`).
+message Capabilities {
+  repeated string add = 1;
 }
 
 message RunResponse {

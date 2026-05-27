@@ -458,6 +458,8 @@ func (s *AteomHerder) prepareOCIBundles(
 			spec.GetPauseImage(),
 			[]string{"/pause"},
 			nil,
+			nil,  // pause container uses the default sandbox cap set only
+			0, 0, // pause container always runs as root
 			map[string]string{
 				"io.kubernetes.cri.container-type": "sandbox",
 				"io.kubernetes.cri.container-name": "pause",
@@ -476,6 +478,10 @@ func (s *AteomHerder) prepareOCIBundles(
 		for _, env := range ctr.GetEnv() {
 			envs = append(envs, fmt.Sprintf("%s=%s", env.GetName(), env.GetValue()))
 		}
+		capAdds := ctr.GetSecurityContext().GetCapabilities().GetAdd()
+		runAsUser := ctr.GetSecurityContext().GetRunAsUser()
+		runAsGroup := ctr.GetSecurityContext().GetRunAsGroup()
+
 		g.Go(func() error {
 			if err := prepareOCIDirectory(
 				gCtx,
@@ -485,6 +491,8 @@ func (s *AteomHerder) prepareOCIBundles(
 				ctr.GetImage(),
 				ctr.GetCommand(),
 				envs,
+				capAdds,
+				runAsUser, runAsGroup,
 				map[string]string{
 					"io.kubernetes.cri.container-type": "container",
 					"io.kubernetes.cri.sandbox-id":     "pause",

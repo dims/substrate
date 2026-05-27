@@ -25,6 +25,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/memorypullcache"
@@ -33,7 +34,48 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryPullCache, actorTemplateNamespace, actorTemplateName, actorID, containerName, ref string, args []string, env []string, annotations map[string]string, netns string) error {
+// defaultSandboxCapabilities is the unconditional baseline cap set applied
+// to every OCI bundle. Callers may add to it via `capAdds`; the pause
+// container always uses this set unmodified.
+var defaultSandboxCapabilities = []string{
+	"CAP_AUDIT_WRITE",
+	"CAP_KILL",
+	"CAP_NET_BIND_SERVICE",
+}
+
+// resolveCapabilities merges the default sandbox cap set with the
+// caller-requested adds, normalising each entry to its `CAP_…` form so
+// templates may write either `NET_ADMIN` or `CAP_NET_ADMIN`. Duplicates
+// are de-duplicated; ordering is stable (defaults first, then adds in the
+// order supplied).
+func resolveCapabilities(capAdds []string) []string {
+	seen := make(map[string]struct{}, len(defaultSandboxCapabilities)+len(capAdds))
+	out := make([]string, 0, len(defaultSandboxCapabilities)+len(capAdds))
+	for _, c := range defaultSandboxCapabilities {
+		if _, ok := seen[c]; ok {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	for _, c := range capAdds {
+		c = strings.ToUpper(strings.TrimSpace(c))
+		if c == "" {
+			continue
+		}
+		if !strings.HasPrefix(c, "CAP_") {
+			c = "CAP_" + c
+		}
+		if _, ok := seen[c]; ok {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	return out
+}
+
+func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryPullCache, actorTemplateNamespace, actorTemplateName, actorID, containerName, ref string, args []string, env []string, capAdds []string, runAsUser, runAsGroup int64, annotations map[string]string, netns string) error {
 	tracer := otel.Tracer("prepareOCIDirectory")
 
 	ctx, span := tracer.Start(ctx, "prepareOCIDirectory")
@@ -69,35 +111,22 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
 	ociSpec := &specs.Spec{
 		Process: &specs.Process{
 			User: specs.User{
-				UID: 0,
-				GID: 0,
+				UID: uint32(runAsUser),
+				GID: uint32(runAsGroup),
 			},
 			Args: args,
 			Env:  envVars,
 			Cwd:  "/",
-			Capabilities: &specs.LinuxCapabilities{
-				Bounding: []string{
-					"CAP_AUDIT_WRITE",
-					"CAP_KILL",
-					"CAP_NET_BIND_SERVICE",
-				},
-				Effective: []string{
-					"CAP_AUDIT_WRITE",
-					"CAP_KILL",
-					"CAP_NET_BIND_SERVICE",
-				},
-				Inheritable: []string{
-					"CAP_AUDIT_WRITE",
-					"CAP_KILL",
-					"CAP_NET_BIND_SERVICE",
-				},
-				Permitted: []string{
-					"CAP_AUDIT_WRITE",
-					"CAP_KILL",
-					"CAP_NET_BIND_SERVICE",
-				},
-				// TODO(gvisor.dev/issue/3166): support ambient capabilities
-			},
+			Capabilities: func() *specs.LinuxCapabilities {
+				caps := resolveCapabilities(capAdds)
+				return &specs.LinuxCapabilities{
+					Bounding:    caps,
+					Effective:   caps,
+					Inheritable: caps,
+					Permitted:   caps,
+					// TODO(gvisor.dev/issue/3166): support ambient capabilities
+				}
+			}(),
 			Rlimits: []specs.POSIXRlimit{
 				{
 					Type: "RLIMIT_NOFILE",

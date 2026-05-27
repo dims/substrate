@@ -49,3 +49,52 @@ func TestActorTemplateDeepCopy(t *testing.T) {
 		t.Errorf("DeepCopy() mismatch (-want +got):\n%s", diff)
 	}
 }
+
+func TestContainerSecurityContextDeepCopy(t *testing.T) {
+	in := &ActorTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-template",
+			Namespace: "test-ns",
+		},
+		Spec: ActorTemplateSpec{
+			WorkerPoolRef: corev1.ObjectReference{
+				Namespace: "test-ns",
+				Name:      "test-pool",
+			},
+			SnapshotsConfig: SnapshotsConfig{
+				Location: "gs://test-bucket/test-folder",
+			},
+			Containers: []Container{
+				{
+					Name:  "app",
+					Image: "registry.example/app:test",
+					SecurityContext: &ContainerSecurityContext{
+						Capabilities: &Capabilities{
+							Add: []string{"NET_ADMIN", "SETUID", "SETGID"},
+						},
+						RunAsUser:  ptrInt64(1000),
+						RunAsGroup: ptrInt64(1000),
+					},
+				},
+			},
+		},
+	}
+
+	out := in.DeepCopy()
+
+	if diff := cmp.Diff(in, out); diff != "" {
+		t.Errorf("DeepCopy() mismatch (-want +got):\n%s", diff)
+	}
+
+	// Mutating the copy must not bleed into the original.
+	out.Spec.Containers[0].SecurityContext.Capabilities.Add[0] = "MUTATED"
+	if got := in.Spec.Containers[0].SecurityContext.Capabilities.Add[0]; got != "NET_ADMIN" {
+		t.Errorf("DeepCopy did not isolate Capabilities.Add slice: original now %q", got)
+	}
+	*out.Spec.Containers[0].SecurityContext.RunAsUser = 9999
+	if got := *in.Spec.Containers[0].SecurityContext.RunAsUser; got != 1000 {
+		t.Errorf("DeepCopy did not isolate RunAsUser pointer: original now %d", got)
+	}
+}
+
+func ptrInt64(v int64) *int64 { return &v }
