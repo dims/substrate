@@ -395,7 +395,7 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (*atele
 				"io.kubernetes.cri.container-name": "pause",
 			},
 			netnsPath,
-			nil,
+			firstGpuSpec(req.GetSpec().GetContainers()),
 		); err != nil {
 			return fmt.Errorf("while creating pause OCI bundle: %w", err)
 		}
@@ -648,7 +648,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 				"io.kubernetes.cri.container-name": "pause",
 			},
 			netnsPath,
-			nil,
+			firstGpuSpec(req.GetSpec().GetContainers()),
 		); err != nil {
 			return fmt.Errorf("while creating pause OCI bundle: %w", err)
 		}
@@ -733,6 +733,15 @@ func toAteomGpuSpec(g *ateletpb.GpuSpec) *ateompb.GpuSpec {
 		DriverCapabilities: g.GetDriverCapabilities(),
 		DriverVersion:      g.GetDriverVersion(),
 	}
+}
+
+func firstGpuSpec(containers []*ateletpb.Container) *ateletpb.GpuSpec {
+	for _, c := range containers {
+		if g := c.GetGpu(); g != nil {
+			return g
+		}
+	}
+	return nil
 }
 
 type AteomDialer struct {

@@ -52,14 +52,67 @@ func (r *runsc) gpuGlobalFlags() []string {
 	return flags
 }
 
-// gpuSaveRestoreFlags returns the --save-restore-exec-argv flags that
-// tell runsc to invoke cuda-checkpoint inside the sandbox before
-// checkpoint and after restore. release-20260520.0 of gVisor's nvproxy
-// auto-registers cuda-checkpoint internally when --nvproxy is set on
-// create; passing --save-restore-exec-argv at checkpoint then fails
-// with "save/restore binary is already set". Leave the drain to
-// nvproxy and don't pass the flag explicitly.
+// gpuSaveRestoreFlags is intentionally nil. gVisor's runsc
+// --save-restore-exec-argv runs the exec in the container being
+// checkpointed (pause for substrate's root sandbox). pause is the
+// k8s pause image, distroless, no /bin/sh. So a wrapper script
+// can't execute there. We drain CUDA externally via cmdDrainCUDA
+// (runsc exec supervisor cuda-checkpoint --toggle --pid 1) just
+// before cmdCheckpoint.
 func (r *runsc) gpuSaveRestoreFlags() []string {
+	return nil
+}
+
+// cmdDrainCUDA runs cuda-checkpoint inside the supervisor sub-container
+// to drain CUDA state out of all live nvproxy clients. Without this,
+// `runsc checkpoint` returns "can't save with live nvproxy clients".
+func (r *runsc) cmdDrainCUDA(ctx context.Context) error {
+	if r.gpu == nil {
+		return nil
+	}
+	slog.InfoContext(ctx, "About to drain CUDA via runsc exec supervisor cuda-checkpoint")
+	cmd := exec.CommandContext(
+		ctx,
+		r.path,
+		"-log-format", "json",
+		"--alsologtostderr",
+		"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
+		"exec",
+		"--", // marker for argv passthrough
+		"supervisor",
+		"/usr/local/bin/cuda-checkpoint", "--toggle", "--pid", "1",
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("while running cuda-checkpoint drain: %w", err)
+	}
+	return nil
+}
+
+// cmdUntoggleCUDA reverses cmdDrainCUDA after restore: cuda-checkpoint
+// --toggle flips the locked CUDA state back to running.
+func (r *runsc) cmdUntoggleCUDA(ctx context.Context) error {
+	if r.gpu == nil {
+		return nil
+	}
+	slog.InfoContext(ctx, "About to untoggle CUDA via runsc exec supervisor cuda-checkpoint")
+	cmd := exec.CommandContext(
+		ctx,
+		r.path,
+		"-log-format", "json",
+		"--alsologtostderr",
+		"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
+		"exec",
+		"--",
+		"supervisor",
+		"/usr/local/bin/cuda-checkpoint", "--toggle", "--pid", "1",
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("while running cuda-checkpoint untoggle: %w", err)
+	}
 	return nil
 }
 

@@ -356,6 +356,13 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		return nil, fmt.Errorf("while creating checkpoint directory: %w", err)
 	}
 
+	// Drain CUDA state out of nvproxy clients via cuda-checkpoint
+	// inside the supervisor container. Without this, runsc checkpoint
+	// returns "can't save with live nvproxy clients".
+	if err := rcmd.cmdDrainCUDA(ctx); err != nil {
+		return nil, fmt.Errorf("while draining CUDA: %w", err)
+	}
+
 	// Checkpoint pause container (root of the sandbox)
 	if err := rcmd.cmdCheckpoint(ctx, "pause", checkpointPath); err != nil {
 		return nil, fmt.Errorf("while checkpointing pause: %w", err)
@@ -507,6 +514,12 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		if err := rcmd.cmdRestore(ctx, pw, ac.GetName(), checkpointDir); err != nil {
 			return nil, fmt.Errorf("while starting %q application container: %w", ac.GetName(), err)
 		}
+	}
+
+	// CUDA was drained by cmdDrainCUDA before checkpoint; toggle it
+	// back to running now that the supervisor is restored.
+	if err := rcmd.cmdUntoggleCUDA(ctx); err != nil {
+		return nil, fmt.Errorf("while untoggling CUDA: %w", err)
 	}
 
 	s.actorLogger.EmitLifecycleLog("Actor restored", req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())

@@ -324,18 +324,31 @@ func addGPUToOCISpec(spec *specs.Spec) error {
 			Path: p, Type: "c", Major: major, Minor: minor,
 			FileMode: &mode, UID: &uid, GID: &gid,
 		})
-	}
-	for _, src := range []string{
-		"/usr/local/bin/cuda-checkpoint",
-		"/usr/local/bin/cuda-checkpoint-wrapper.sh",
-	} {
-		if _, err := os.Stat(src); err != nil {
-			continue
+		if spec.Linux.Resources == nil {
+			spec.Linux.Resources = &specs.LinuxResources{}
 		}
-		spec.Mounts = append(spec.Mounts, specs.Mount{
-			Destination: src, Type: "bind", Source: src,
-			Options: []string{"ro", "bind"},
-		})
+		allow := true
+		access := "rwm"
+		spec.Linux.Resources.Devices = append(spec.Linux.Resources.Devices,
+			specs.LinuxDeviceCgroup{Allow: allow, Type: "c", Major: &major, Minor: &minor, Access: access},
+		)
+	}
+	for _, name := range []string{"cuda-checkpoint", "cuda-checkpoint-wrapper.sh"} {
+		dest := "/usr/local/bin/" + name
+		// Source paths: prefer the shared /run/ateom-gvisor/static-files
+		// drop (visible inside both atelet and kind-node), fall back to
+		// /usr/local/bin if the operator installed it system-wide.
+		candidates := []string{"/run/ateom-gvisor/static-files/" + name, dest}
+		for _, src := range candidates {
+			if _, err := os.Stat(src); err != nil {
+				continue
+			}
+			spec.Mounts = append(spec.Mounts, specs.Mount{
+				Destination: dest, Type: "bind", Source: src,
+				Options: []string{"ro", "bind"},
+			})
+			break
+		}
 	}
 	return nil
 }
