@@ -169,6 +169,9 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
 		if err := addGPUToOCISpec(ociSpec); err != nil {
 			return fmt.Errorf("while adding GPU passthrough to OCI spec: %w", err)
 		}
+		if err := injectNVIDIAAssetsIntoRootfs(ctx, rootPath); err != nil {
+			return fmt.Errorf("while injecting NVIDIA driver assets into rootfs: %w", err)
+		}
 	}
 	ociSpecBytes, err := json.MarshalIndent(ociSpec, "", "  ")
 	if err != nil {
@@ -351,4 +354,104 @@ func addGPUToOCISpec(spec *specs.Spec) error {
 		}
 	}
 	return nil
+}
+
+// nvidiaLibsStagingDir is where setup-host.sh stages the host's NVIDIA
+// driver libs (libcuda.so.<v>, libnvidia-ml.so.<v>, …) plus their
+// SONAME / dev symlinks. atelet copies them into each actor's rootfs at
+// sandbox-create time so the workload image doesn't have to bake them in.
+//
+// This is the substrate-side equivalent of what
+// `nvidia-container-cli configure --compute --utility --device=all` does
+// in the standard docker+nvidia-container-runtime flow. We replicate the
+// effect in Go rather than exec'ing nvidia-container-cli because atelet
+// runs on `distroless/static-debian13` and has no dynamic linker for the
+// `nvidia-container-cli` binary's libnvidia-container.so.1 dep.
+const nvidiaLibsStagingDir = "/run/ateom-gvisor/static-files/nvidia-libs"
+
+// rootfsNVIDIALibDest is where libcuda.so.<v> et al. need to land inside
+// the sandbox rootfs. /etc/ld.so.cache on every glibc distro searches
+// this path, so dlopen("libcuda.so.1") just works.
+const rootfsNVIDIALibDest = "/usr/lib/x86_64-linux-gnu"
+
+// injectNVIDIAAssetsIntoRootfs walks nvidiaLibsStagingDir and mirrors
+// every entry into <rootfs>/usr/lib/x86_64-linux-gnu — preserving
+// symlinks as symlinks and copying real files byte-for-byte. Hard-fails
+// if the staging dir is missing or empty so an operator misconfiguration
+// surfaces immediately instead of crashing inside the sandbox.
+func injectNVIDIAAssetsIntoRootfs(ctx context.Context, rootfsPath string) error {
+	tracer := otel.Tracer("prepareOCIDirectory")
+	_, span := tracer.Start(ctx, "injectNVIDIAAssetsIntoRootfs")
+	defer span.End()
+
+	entries, err := os.ReadDir(nvidiaLibsStagingDir)
+	if err != nil {
+		return fmt.Errorf("reading NVIDIA libs staging dir %q (run setup-host.sh): %w", nvidiaLibsStagingDir, err)
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("NVIDIA libs staging dir %q is empty — re-run setup-host.sh", nvidiaLibsStagingDir)
+	}
+
+	destDir := filepath.Join(rootfsPath, rootfsNVIDIALibDest)
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return fmt.Errorf("creating dest dir %q: %w", destDir, err)
+	}
+
+	var copied, linked int
+	for _, e := range entries {
+		name := e.Name()
+		src := filepath.Join(nvidiaLibsStagingDir, name)
+		dst := filepath.Join(destDir, name)
+
+		info, err := os.Lstat(src)
+		if err != nil {
+			return fmt.Errorf("lstat %q: %w", src, err)
+		}
+
+		_ = os.Remove(dst)
+
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(src)
+			if err != nil {
+				return fmt.Errorf("readlink %q: %w", src, err)
+			}
+			if err := os.Symlink(target, dst); err != nil {
+				return fmt.Errorf("symlink %q -> %q: %w", dst, target, err)
+			}
+			linked++
+		case info.Mode().IsRegular():
+			if err := copyRegularFile(src, dst, info.Mode().Perm()); err != nil {
+				return fmt.Errorf("copy %q -> %q: %w", src, dst, err)
+			}
+			copied++
+		default:
+			return fmt.Errorf("unexpected file type in %q: %s", src, info.Mode())
+		}
+	}
+
+	slog.InfoContext(ctx, "Injected NVIDIA driver assets into rootfs",
+		slog.String("source", nvidiaLibsStagingDir),
+		slog.String("dest", destDir),
+		slog.Int("files_copied", copied),
+		slog.Int("symlinks_created", linked),
+	)
+	return nil
+}
+
+func copyRegularFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
