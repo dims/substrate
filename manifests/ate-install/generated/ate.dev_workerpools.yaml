@@ -69,6 +69,17 @@ spec:
                 description: AteomImage is the ateom container image to deploy as
                   workers.
                 type: string
+              backend:
+                default: gvisor
+                description: |-
+                  Backend selects the sandbox runtime used by this pool's workers. A pool
+                  is homogeneous: every worker uses the same backend. "gvisor" runs runsc;
+                  "firecracker" runs a Firecracker microVM (requires /dev/kvm on the node).
+                  The AteomImage must be an ateom build matching this backend.
+                enum:
+                - gvisor
+                - firecracker
+                type: string
               replicas:
                 description: Replicas is the number of worker pods to run.
                 format: int32

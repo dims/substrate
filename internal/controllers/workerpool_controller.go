@@ -22,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	appsv1ac "k8s.io/client-go/applyconfigurations/apps/v1"
@@ -119,6 +120,45 @@ func (r *WorkerPoolReconciler) syncStatus(ctx context.Context, wp *atev1alpha1.W
 // Deployment managed by a WorkerPool. Only fields owned by this controller
 // are declared here.
 func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool) *appsv1ac.DeploymentApplyConfiguration {
+	container := corev1ac.Container().
+		WithName("ateom").
+		WithImage(wp.Spec.AteomImage).
+		WithArgs(
+			"-pod-namespace=$(POD_NAMESPACE)",
+			"-pod-name=$(POD_NAME)",
+		).
+		WithSecurityContext(corev1ac.SecurityContext().
+			WithPrivileged(true).
+			WithRunAsUser(0).
+			WithRunAsGroup(0)).
+		WithEnv(
+			corev1ac.EnvVar().
+				WithName("POD_NAMESPACE").
+				WithValueFrom(corev1ac.EnvVarSource().
+					WithFieldRef(corev1ac.ObjectFieldSelector().
+						WithFieldPath("metadata.namespace"))),
+			corev1ac.EnvVar().
+				WithName("POD_NAME").
+				WithValueFrom(corev1ac.EnvVarSource().
+					WithFieldRef(corev1ac.ObjectFieldSelector().
+						WithFieldPath("metadata.name"))),
+		).
+		WithVolumeMounts(corev1ac.VolumeMount().
+			WithName("run-ateom").
+			WithMountPath("/run/ateom-gvisor"))
+
+	// Firecracker workers reserve memory/CPU for the microVM guest. /dev/kvm and
+	// /dev/net/tun are already reachable via the privileged securityContext, so
+	// no extra device plumbing is needed for the PoC (a KVM device-plugin would
+	// let us drop full privilege later).
+	if wp.Spec.Backend == atev1alpha1.BackendFirecracker {
+		container = container.WithResources(corev1ac.ResourceRequirements().
+			WithRequests(corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("1"),
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			}))
+	}
+
 	return appsv1ac.Deployment(deploymentName(wp.Name), wp.Namespace).
 		WithOwnerReferences(metav1ac.OwnerReference().
 			WithAPIVersion(atev1alpha1.GroupVersion.String()).
@@ -136,32 +176,7 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool) *appsv1ac.Deployment
 					"ate.dev/worker-pool": wp.Name,
 				}).
 				WithSpec(corev1ac.PodSpec().
-					WithContainers(corev1ac.Container().
-						WithName("ateom").
-						WithImage(wp.Spec.AteomImage).
-						WithArgs(
-							"-pod-namespace=$(POD_NAMESPACE)",
-							"-pod-name=$(POD_NAME)",
-						).
-						WithSecurityContext(corev1ac.SecurityContext().
-							WithPrivileged(true).
-							WithRunAsUser(0).
-							WithRunAsGroup(0)).
-						WithEnv(
-							corev1ac.EnvVar().
-								WithName("POD_NAMESPACE").
-								WithValueFrom(corev1ac.EnvVarSource().
-									WithFieldRef(corev1ac.ObjectFieldSelector().
-										WithFieldPath("metadata.namespace"))),
-							corev1ac.EnvVar().
-								WithName("POD_NAME").
-								WithValueFrom(corev1ac.EnvVarSource().
-									WithFieldRef(corev1ac.ObjectFieldSelector().
-										WithFieldPath("metadata.name"))),
-						).
-						WithVolumeMounts(corev1ac.VolumeMount().
-							WithName("run-ateom").
-							WithMountPath("/run/ateom-gvisor"))).
+					WithContainers(container).
 					WithSecurityContext(corev1ac.PodSecurityContext().
 						WithRunAsUser(0).
 						WithRunAsGroup(0)).

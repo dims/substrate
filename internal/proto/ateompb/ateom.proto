@@ -18,7 +18,7 @@ package ateom;
 
 option go_package = "github.com/agent-substrate/substrate/internal/proto/ateompb";
 
-// Ateom is the interface to control a single gVisor (or, in the future microVM)
+// Ateom is the interface to control a single gVisor or microVM (Firecracker)
 // guest inside a worker pod.
 //
 // Each ateom server has two main states, "available" and "executing".
@@ -30,21 +30,63 @@ option go_package = "github.com/agent-substrate/substrate/internal/proto/ateompb
 //
 // When the ateom is "executing", the substrate control plane can checkpoint the
 // running workload (with CheckpointWorkload).  This moves the ateom back to
-// "free" state.
+// "available" state.
+//
+// The runtime backend (gVisor, Firecracker, ...) is selected per request via
+// RuntimeConfig. A given ateom binary implements exactly one backend; the
+// control plane routes a workload to a worker pool whose ateom matches.
 service Ateom {
   // RunWorkload tells ateom to begin running a new workload (one or more
   // containers, potentially with shared filesystems).
   rpc RunWorkload(RunWorkloadRequest) returns (RunWorkloadResponse) {}
 
   // CheckpointWorkload tells ateom to save the current state of the running
-  // workload to object storage, and then completely reset itself to a blank
-  // state (back to "available" state.)
+  // workload, and then completely reset itself to a blank state (back to
+  // "available" state.)
   rpc CheckpointWorkload(CheckpointWorkloadRequest) returns (CheckpointWorkloadResponse) {}
 
   // RestoreWorkload restores a workload from checkpoint that was previously
-  // written by CheckpointWorkload.  Ateom will handle downloading the correct
-  // gVisor / runsc version to match the checkpoint.
+  // written by CheckpointWorkload.
   rpc RestoreWorkload(RestoreWorkloadRequest) returns (RestoreWorkloadResponse) {}
+
+  // GetCapabilities reports what this ateom backend supports (memory snapshot,
+  // local pause, restore portability), so the control plane can decide which
+  // lifecycle modes (None/PAUSED/SUSPENDED) and scheduling constraints apply.
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (Capabilities) {}
+}
+
+// RuntimeConfig carries backend-specific runtime parameters. Exactly one arm is
+// set, matching the ateom binary's backend.
+message RuntimeConfig {
+  oneof backend {
+    GVisorParams  gvisor  = 1;
+    MicroVMParams microvm = 2;
+  }
+}
+
+// GVisorParams configures the gVisor (runsc) backend.
+message GVisorParams {
+  // Local filesystem path to the runsc binary (already fetched by atelet).
+  string runsc_path = 1;
+}
+
+// MicroVMParams configures a microVM (Firecracker) backend. All paths are local
+// to the worker (atelet stages the kernel/rootfs/vmm before calling ateom).
+message MicroVMParams {
+  string vmm_binary_path   = 1; // firecracker (or jailer) binary
+  string kernel_image_path = 2; // guest kernel (vmlinux)
+  string rootfs_image_path = 3; // root block device (ext4) built from the OCI image
+  string kernel_cmdline    = 4;
+  uint32 vcpu_count        = 5;
+  uint32 mem_size_mib      = 6;
+  string cpu_template      = 7; // restore-portability class (e.g. T2, T2A; empty = none)
+
+  // Networking: a host tap is created and the guest gets a static IP.
+  string tap_device_name = 8;  // e.g. fc-tap0
+  string guest_mac       = 9;  // e.g. 06:00:AC:10:00:02
+  string guest_ip        = 10; // e.g. 172.16.0.2
+  string host_tap_cidr   = 11; // e.g. 172.16.0.1/24
+  string guest_netmask   = 12; // e.g. 255.255.255.0
 }
 
 message RunWorkloadRequest {
@@ -52,9 +94,13 @@ message RunWorkloadRequest {
   string actor_template_name      = 2;
   string actor_id                 = 3;
 
-  string runsc_path = 4;
+  // Deprecated: use runtime.gvisor.runsc_path. Retained for wire compatibility.
+  string runsc_path = 4 [deprecated = true];
 
   WorkloadSpec spec = 5;
+
+  // Backend-specific runtime configuration (gVisor / microVM).
+  RuntimeConfig runtime = 7;
 }
 
 // WorkloadSpec parallels Pod, but with far fewer configurable fields.
@@ -67,6 +113,11 @@ message Container {
 }
 
 message RunWorkloadResponse {
+  // ready is true once the workload is up and serving.
+  bool ready = 1;
+  // workload_ip is the address the workload is reachable at (backend-dependent;
+  // for a microVM this is the guest IP on the tap network).
+  string workload_ip = 2;
 }
 
 message CheckpointWorkloadRequest {
@@ -74,7 +125,8 @@ message CheckpointWorkloadRequest {
   string actor_template_name      = 2;
   string actor_id                 = 3;
 
-  string runsc_path = 4;
+  // Deprecated: use runtime.gvisor.runsc_path.
+  string runsc_path = 4 [deprecated = true];
 
   WorkloadSpec spec = 5;
 
@@ -83,14 +135,31 @@ message CheckpointWorkloadRequest {
   //
   // The structure of the checkpoint should generally be treated as opaque. For
   // gVisor, the checkpoint consists of a checkpoint.img file that contains the
-  // memory, sentry state, and filesystem deltas.
+  // memory, sentry state, and filesystem deltas. For a microVM it is the VM
+  // state file + memory file (+ rootfs disk). See CheckpointWorkloadResponse.manifest.
   //
   // For example: "gs://bucket/actors/1234/snapshots/5678/"
   string snapshot_uri_prefix = 6;
+
+  // Backend-specific runtime configuration.
+  RuntimeConfig runtime = 7;
+
+  // Where to place the snapshot: DURABLE (object storage, SUSPENDED) or LOCAL
+  // (keep on the node for fast resume, PAUSED). Backends that don't advertise
+  // supports_local_pause treat LOCAL as DURABLE.
+  Destination destination = 8;
+}
+
+// Destination selects snapshot durability/locality (ties to the actor state
+// machine's PAUSED vs SUSPENDED, issue #119).
+enum Destination {
+  DESTINATION_DURABLE = 0; // object storage (SUSPENDED) — default
+  DESTINATION_LOCAL   = 1; // node-local (PAUSED)
 }
 
 message CheckpointWorkloadResponse {
-
+  // Backend-authored description of the snapshot just written.
+  SnapshotManifest manifest = 1;
 }
 
 message RestoreWorkloadRequest {
@@ -98,14 +167,42 @@ message RestoreWorkloadRequest {
   string actor_template_name      = 2;
   string actor_id                 = 3;
 
-  string runsc_path = 4;
+  // Deprecated: use runtime.gvisor.runsc_path.
+  string runsc_path = 4 [deprecated = true];
 
   WorkloadSpec spec = 5;
 
   // The object storage URI prefix of the snapshot to restore.
   string snapshot_uri_prefix = 6;
+
+  // Backend-specific runtime configuration.
+  RuntimeConfig runtime = 7;
 }
 
 message RestoreWorkloadResponse {
+  bool ready = 1;
+  string workload_ip = 2;
+}
 
+// SnapshotManifest is the backend-authored description of a snapshot. The
+// control plane treats the artifacts as opaque; provenance is used to validate
+// that a snapshot can be restored on a given host (issue #119 "devolution").
+message SnapshotManifest {
+  repeated string artifact_names = 1; // e.g. ["vmstate","memory"] or ["checkpoint.img","pages.img"]
+  string backend          = 2;
+  string vmm_version      = 3;        // runsc / firecracker version
+  string kernel_id        = 4;
+  string cpu_template     = 5;
+  map<string, string> provenance = 6; // image digest, etc.
+}
+
+message GetCapabilitiesRequest {}
+
+// Capabilities describes what an ateom backend supports.
+message Capabilities {
+  bool supports_local_pause       = 1; // can keep a snapshot node-local (PAUSED)
+  bool supports_incremental       = 2; // diff/incremental snapshots
+  bool supports_memory_snapshot   = 3; // captures RAM (false => clean-restart only)
+  bool restore_requires_same_host = 4; // snapshot only restores on matching VMM/kernel/CPU
+  string snapshot_portability_class = 5; // CPU template / "any"
 }

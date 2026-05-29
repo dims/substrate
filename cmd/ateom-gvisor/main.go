@@ -168,6 +168,34 @@ type AteomService struct {
 
 var _ ateompb.AteomServer = (*AteomService)(nil)
 
+// runscPathGetter is satisfied by all three ateom request types.
+type runscPathGetter interface {
+	GetRunscPath() string
+	GetRuntime() *ateompb.RuntimeConfig
+}
+
+// gvisorRunscPath prefers the runsc path carried in the generalized
+// RuntimeConfig and falls back to the deprecated top-level runsc_path for wire
+// compatibility with older callers.
+func gvisorRunscPath(req runscPathGetter) string {
+	if p := req.GetRuntime().GetGvisor().GetRunscPath(); p != "" {
+		return p
+	}
+	return req.GetRunscPath()
+}
+
+// GetCapabilities reports the gVisor backend's capabilities so the control
+// plane can decide which lifecycle modes and scheduling constraints apply.
+func (s *AteomService) GetCapabilities(_ context.Context, _ *ateompb.GetCapabilitiesRequest) (*ateompb.Capabilities, error) {
+	return &ateompb.Capabilities{
+		SupportsLocalPause:       true, // runsc checkpoint writes to a local image dir
+		SupportsIncremental:      false,
+		SupportsMemorySnapshot:   true,  // memory + sentry state + filesystem deltas
+		RestoreRequiresSameHost:  false, // gVisor checkpoints are portable across hosts
+		SnapshotPortabilityClass: "any",
+	}, nil
+}
+
 // NewService creates a new AteomService.
 func NewService(interiorNetNS netns.NsHandle, eth0LinkInfo *SaveLinkInfo, actorLogger *ateom.ActorLogger) *AteomService {
 	svc := &AteomService{
@@ -270,7 +298,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	}
 
 	rcmd := &runsc{
-		path:                   req.GetRunscPath(),
+		path:                   gvisorRunscPath(req),
 		actorTemplateNamespace: req.GetActorTemplateNamespace(),
 		actorTemplateName:      req.GetActorTemplateName(),
 		actorID:                req.GetActorId(),
@@ -317,7 +345,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	//   * After we exit, atelet will tear down OCI bundles and reset the actor directory.
 
 	rcmd := &runsc{
-		path:                   req.GetRunscPath(),
+		path:                   gvisorRunscPath(req),
 		actorTemplateNamespace: req.GetActorTemplateNamespace(),
 		actorTemplateName:      req.GetActorTemplateName(),
 		actorID:                req.GetActorId(),
@@ -448,7 +476,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	}
 
 	rcmd := &runsc{
-		path:                   req.GetRunscPath(),
+		path:                   gvisorRunscPath(req),
 		actorTemplateNamespace: req.GetActorTemplateNamespace(),
 		actorTemplateName:      req.GetActorTemplateName(),
 		actorID:                req.GetActorId(),

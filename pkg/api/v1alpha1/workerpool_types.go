@@ -18,6 +18,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// Backend identifies the sandbox runtime used by a WorkerPool's workers.
+const (
+	// BackendGVisor runs workloads in a gVisor (runsc) sandbox. Default.
+	BackendGVisor = "gvisor"
+	// BackendFirecracker runs workloads in a Firecracker microVM. Requires
+	// /dev/kvm on the node (and, for nested environments, nested virt).
+	BackendFirecracker = "firecracker"
+)
+
 type WorkerPoolSpec struct {
 	// Replicas is the number of worker pods to run.
 	// +required
@@ -27,6 +36,16 @@ type WorkerPoolSpec struct {
 	// AteomImage is the ateom container image to deploy as workers.
 	// +required
 	AteomImage string `json:"ateomImage"`
+
+	// Backend selects the sandbox runtime used by this pool's workers. A pool
+	// is homogeneous: every worker uses the same backend. "gvisor" runs runsc;
+	// "firecracker" runs a Firecracker microVM (requires /dev/kvm on the node).
+	// The AteomImage must be an ateom build matching this backend.
+	//
+	// +kubebuilder:validation:Enum=gvisor;firecracker
+	// +kubebuilder:default=gvisor
+	// +optional
+	Backend string `json:"backend,omitempty"`
 }
 
 type WorkerPoolStatus struct {

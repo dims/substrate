@@ -36,13 +36,14 @@ const (
 	Ateom_RunWorkload_FullMethodName        = "/ateom.Ateom/RunWorkload"
 	Ateom_CheckpointWorkload_FullMethodName = "/ateom.Ateom/CheckpointWorkload"
 	Ateom_RestoreWorkload_FullMethodName    = "/ateom.Ateom/RestoreWorkload"
+	Ateom_GetCapabilities_FullMethodName    = "/ateom.Ateom/GetCapabilities"
 )
 
 // AteomClient is the client API for Ateom service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Ateom is the interface to control a single gVisor (or, in the future microVM)
+// Ateom is the interface to control a single gVisor or microVM (Firecracker)
 // guest inside a worker pod.
 //
 // Each ateom server has two main states, "available" and "executing".
@@ -54,19 +55,26 @@ const (
 //
 // When the ateom is "executing", the substrate control plane can checkpoint the
 // running workload (with CheckpointWorkload).  This moves the ateom back to
-// "free" state.
+// "available" state.
+//
+// The runtime backend (gVisor, Firecracker, ...) is selected per request via
+// RuntimeConfig. A given ateom binary implements exactly one backend; the
+// control plane routes a workload to a worker pool whose ateom matches.
 type AteomClient interface {
 	// RunWorkload tells ateom to begin running a new workload (one or more
 	// containers, potentially with shared filesystems).
 	RunWorkload(ctx context.Context, in *RunWorkloadRequest, opts ...grpc.CallOption) (*RunWorkloadResponse, error)
 	// CheckpointWorkload tells ateom to save the current state of the running
-	// workload to object storage, and then completely reset itself to a blank
-	// state (back to "available" state.)
+	// workload, and then completely reset itself to a blank state (back to
+	// "available" state.)
 	CheckpointWorkload(ctx context.Context, in *CheckpointWorkloadRequest, opts ...grpc.CallOption) (*CheckpointWorkloadResponse, error)
 	// RestoreWorkload restores a workload from checkpoint that was previously
-	// written by CheckpointWorkload.  Ateom will handle downloading the correct
-	// gVisor / runsc version to match the checkpoint.
+	// written by CheckpointWorkload.
 	RestoreWorkload(ctx context.Context, in *RestoreWorkloadRequest, opts ...grpc.CallOption) (*RestoreWorkloadResponse, error)
+	// GetCapabilities reports what this ateom backend supports (memory snapshot,
+	// local pause, restore portability), so the control plane can decide which
+	// lifecycle modes (None/PAUSED/SUSPENDED) and scheduling constraints apply.
+	GetCapabilities(ctx context.Context, in *GetCapabilitiesRequest, opts ...grpc.CallOption) (*Capabilities, error)
 }
 
 type ateomClient struct {
@@ -107,11 +115,21 @@ func (c *ateomClient) RestoreWorkload(ctx context.Context, in *RestoreWorkloadRe
 	return out, nil
 }
 
+func (c *ateomClient) GetCapabilities(ctx context.Context, in *GetCapabilitiesRequest, opts ...grpc.CallOption) (*Capabilities, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Capabilities)
+	err := c.cc.Invoke(ctx, Ateom_GetCapabilities_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AteomServer is the server API for Ateom service.
 // All implementations must embed UnimplementedAteomServer
 // for forward compatibility.
 //
-// Ateom is the interface to control a single gVisor (or, in the future microVM)
+// Ateom is the interface to control a single gVisor or microVM (Firecracker)
 // guest inside a worker pod.
 //
 // Each ateom server has two main states, "available" and "executing".
@@ -123,19 +141,26 @@ func (c *ateomClient) RestoreWorkload(ctx context.Context, in *RestoreWorkloadRe
 //
 // When the ateom is "executing", the substrate control plane can checkpoint the
 // running workload (with CheckpointWorkload).  This moves the ateom back to
-// "free" state.
+// "available" state.
+//
+// The runtime backend (gVisor, Firecracker, ...) is selected per request via
+// RuntimeConfig. A given ateom binary implements exactly one backend; the
+// control plane routes a workload to a worker pool whose ateom matches.
 type AteomServer interface {
 	// RunWorkload tells ateom to begin running a new workload (one or more
 	// containers, potentially with shared filesystems).
 	RunWorkload(context.Context, *RunWorkloadRequest) (*RunWorkloadResponse, error)
 	// CheckpointWorkload tells ateom to save the current state of the running
-	// workload to object storage, and then completely reset itself to a blank
-	// state (back to "available" state.)
+	// workload, and then completely reset itself to a blank state (back to
+	// "available" state.)
 	CheckpointWorkload(context.Context, *CheckpointWorkloadRequest) (*CheckpointWorkloadResponse, error)
 	// RestoreWorkload restores a workload from checkpoint that was previously
-	// written by CheckpointWorkload.  Ateom will handle downloading the correct
-	// gVisor / runsc version to match the checkpoint.
+	// written by CheckpointWorkload.
 	RestoreWorkload(context.Context, *RestoreWorkloadRequest) (*RestoreWorkloadResponse, error)
+	// GetCapabilities reports what this ateom backend supports (memory snapshot,
+	// local pause, restore portability), so the control plane can decide which
+	// lifecycle modes (None/PAUSED/SUSPENDED) and scheduling constraints apply.
+	GetCapabilities(context.Context, *GetCapabilitiesRequest) (*Capabilities, error)
 	mustEmbedUnimplementedAteomServer()
 }
 
@@ -154,6 +179,9 @@ func (UnimplementedAteomServer) CheckpointWorkload(context.Context, *CheckpointW
 }
 func (UnimplementedAteomServer) RestoreWorkload(context.Context, *RestoreWorkloadRequest) (*RestoreWorkloadResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RestoreWorkload not implemented")
+}
+func (UnimplementedAteomServer) GetCapabilities(context.Context, *GetCapabilitiesRequest) (*Capabilities, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetCapabilities not implemented")
 }
 func (UnimplementedAteomServer) mustEmbedUnimplementedAteomServer() {}
 func (UnimplementedAteomServer) testEmbeddedByValue()               {}
@@ -230,6 +258,24 @@ func _Ateom_RestoreWorkload_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Ateom_GetCapabilities_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetCapabilitiesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AteomServer).GetCapabilities(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Ateom_GetCapabilities_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AteomServer).GetCapabilities(ctx, req.(*GetCapabilitiesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Ateom_ServiceDesc is the grpc.ServiceDesc for Ateom service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -248,6 +294,10 @@ var Ateom_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RestoreWorkload",
 			Handler:    _Ateom_RestoreWorkload_Handler,
+		},
+		{
+			MethodName: "GetCapabilities",
+			Handler:    _Ateom_GetCapabilities_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
