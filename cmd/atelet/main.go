@@ -65,6 +65,7 @@ var (
 
 	gcpAuthForImagePulls         = pflag.Bool("gcp-auth-for-image-pulls", true, "Use GCP application default credentials mechanism.")
 	localhostRegistryReplacement = pflag.String("localhost-registry-replacement", "", "The replacement registry endpoint for localhost and/or loopback IP addresses, useful for local development. for example kind-registry:5000")
+	imageCacheMaxBytes           = pflag.Int64("image-cache-max-bytes", memorypullcache.DefaultMaxCacheBytes, "Maximum total bytes of extracted image rootfs tarballs to keep in the in-memory pull cache. Least-recently-used images are evicted once this is exceeded; an image larger than this is streamed without caching.")
 
 	showVersion = pflag.Bool("version", false, "Print version and exit.")
 )
@@ -111,7 +112,7 @@ func main() {
 		}
 	}
 
-	pullCache, err := memorypullcache.NewMemoryPullCache(ctx, gcpRegistryAuthn, *localhostRegistryReplacement)
+	pullCache, err := memorypullcache.NewMemoryPullCache(ctx, gcpRegistryAuthn, *localhostRegistryReplacement, *imageCacheMaxBytes)
 	if err != nil {
 		serverboot.Fatal(ctx, "Failed to create pull cache", err)
 	}

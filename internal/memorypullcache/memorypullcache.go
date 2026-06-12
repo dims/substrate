@@ -29,7 +29,6 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
-	"k8s.io/utils/lru"
 )
 
 type MemoryPullCache struct {
@@ -39,28 +38,20 @@ type MemoryPullCache struct {
 
 	// Map from hexadecimal sha256 hash of image to byte contents of composed
 	// tarball
-	cache *lru.Cache
+	cache *byteCache
 }
 
-func NewMemoryPullCache(ctx context.Context, gcpAuthenticator authn.Authenticator, localhostRegistryReplacement string) (*MemoryPullCache, error) {
+func NewMemoryPullCache(ctx context.Context, gcpAuthenticator authn.Authenticator, localhostRegistryReplacement string, maxBytes int64) (*MemoryPullCache, error) {
+	// TODO: share the cache across ateoms on a machine, e.g. an on-disk directory
+	// keyed by sha256, keeping only the hottest images in memory.
 	c := &MemoryPullCache{
-		// TODO: Need a smarter cache with bounds on total consumed size, not
-		// just number of entries.  Potentially also try to share the cache
-		// across ateoms on the same machine.
-		//
-		// It would have to be a directory with files named after the sha256
-		// hash.  The benefit would be that a read might be found in the
-		// filesystem cache, or perhaps the folder could be on SSD.
-		//
-		// From the perspective of stable operation, without hidden kernel
-		// caches that could fill up or have weird behavior, it might be better
-		// to just have two levels.  Store some images in ateom memory, and the
-		// rest are kept in a shared GCS cache.
-		cache:                        lru.New(256),
+		cache:                        newByteCache(maxBytes),
 		localhostRegistryReplacement: localhostRegistryReplacement,
 	}
 
 	c.gcpAuthenticator = gcpAuthenticator
+
+	slog.InfoContext(ctx, "Initialized image pull cache", slog.Int64("max_bytes", maxBytes))
 
 	return c, nil
 }
@@ -99,14 +90,14 @@ func (c *MemoryPullCache) Fetch(ctx context.Context, ref string) (io.ReadCloser,
 			slog.String("digest", requestedDigest.DigestStr()),
 		)
 
-		if vAny, ok := c.cache.Get(requestedDigest.DigestStr()); ok {
+		if data, ok := c.cache.get(requestedDigest.DigestStr()); ok {
 			slog.InfoContext(
 				ctx,
 				"Cache hit",
 				slog.String("ref", ref),
 				slog.String("digest", requestedDigest.DigestStr()),
 			)
-			return io.NopCloser(bytes.NewReader(vAny.([]byte))), nil
+			return io.NopCloser(bytes.NewReader(data)), nil
 		}
 	}
 
@@ -138,42 +129,71 @@ func (c *MemoryPullCache) Fetch(ctx context.Context, ref string) (io.ReadCloser,
 		return nil, fmt.Errorf("in remote.Image: %w", err)
 	}
 
-	size, err := img.Size()
-	if err != nil {
-		return nil, fmt.Errorf("in img.Size(): %w", err)
-	}
-	if size > 100*1024*1024 {
-		slog.InfoContext(ctx,
-			"Image is too large to cache",
-			slog.String("ref", ref),
-			slog.Int64("size", size),
-		)
-		return mutate.Extract(img), err
-	}
-
 	tarData := mutate.Extract(img)
-	defer tarData.Close()
 
-	memData, err := io.ReadAll(tarData)
+	// Only digest-pinned refs are cached (the digest is the cache key); others stream.
+	if !digestWasIncluded {
+		return tarData, nil
+	}
+
+	// img.Size() is the manifest size, not the rootfs, so it can't gate caching.
+	// Read up to the budget: smaller images are cached, larger ones streamed.
+	cacheData, body, err := readBoundedForCache(tarData, c.cache.maxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("while reading image: %w", err)
 	}
 
-	if digestWasIncluded {
-		// If the user requested multi-arch image, the digest they request will
-		// not be the same as the digest of the image we actually downloaded
-		// from the registry.  We need to place the cache entry under the digest
-		// they requested.
-		c.cache.Add(requestedDigest.DigestStr(), memData)
+	if cacheData == nil {
+		slog.InfoContext(ctx,
+			"Image is too large to cache, streaming",
+			slog.String("ref", ref),
+			slog.Int64("max_bytes", c.cache.maxBytes),
+		)
+		return body, nil
+	}
+
+	if c.cache.add(requestedDigest.DigestStr(), cacheData) {
 		slog.InfoContext(
 			ctx,
 			"Populated image cache",
 			slog.String("ref", ref),
 			slog.String("digest", requestedDigest.DigestStr()),
+			slog.Int("bytes", len(cacheData)),
 		)
 	}
 
-	return io.NopCloser(bytes.NewReader(memData)), nil
+	return body, nil
+}
+
+// readBoundedForCache reads up to limit+1 bytes from r. If the stream ends within
+// limit, the whole content is returned as cacheData and r is closed; otherwise
+// cacheData is nil and body streams the buffered prefix followed by the rest of
+// r, closing r on Close. body always yields the full content once.
+func readBoundedForCache(r io.ReadCloser, limit int64) (cacheData []byte, body io.ReadCloser, err error) {
+	buf, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		_ = r.Close()
+		return nil, nil, err
+	}
+
+	if int64(len(buf)) > limit {
+		// Too large to cache; r is closed by the caller via body.Close.
+		return nil, newReadCloser(io.MultiReader(bytes.NewReader(buf), r), r), nil
+	}
+
+	// The whole content is in buf; r is fully consumed and can be closed now.
+	if cerr := r.Close(); cerr != nil {
+		return nil, nil, cerr
+	}
+	return buf, io.NopCloser(bytes.NewReader(buf)), nil
+}
+
+// newReadCloser pairs a Reader with an independent Closer.
+func newReadCloser(r io.Reader, c io.Closer) io.ReadCloser {
+	return struct {
+		io.Reader
+		io.Closer
+	}{r, c}
 }
 
 func registryHost(ref string) string {
