@@ -42,6 +42,10 @@ type MemoryPullCache struct {
 }
 
 func NewMemoryPullCache(ctx context.Context, gcpAuthenticator authn.Authenticator, localhostRegistryReplacement string, maxBytes int64) (*MemoryPullCache, error) {
+	if maxBytes <= 0 {
+		return nil, fmt.Errorf("image cache max bytes must be positive, got %d", maxBytes)
+	}
+
 	// TODO: share the cache across ateoms on a machine, e.g. an on-disk directory
 	// keyed by sha256, keeping only the hottest images in memory.
 	c := &MemoryPullCache{
@@ -137,55 +141,63 @@ func (c *MemoryPullCache) Fetch(ctx context.Context, ref string) (io.ReadCloser,
 	}
 
 	// img.Size() is the manifest size, not the rootfs, so it can't gate caching.
-	// Read up to the budget: smaller images are cached, larger ones streamed.
-	cacheData, body, err := readBoundedForCache(tarData, c.cache.maxBytes)
+	// Reserve budget for the read buffer; if the budget is full, stream instead.
+	reserved := c.cache.perEntryBytes
+	if reserved <= 0 || !c.cache.reserve(reserved) {
+		return tarData, nil
+	}
+
+	buf, more, err := readUpTo(tarData, reserved)
 	if err != nil {
+		c.cache.release(reserved)
 		return nil, fmt.Errorf("while reading image: %w", err)
 	}
 
-	if cacheData == nil {
+	if more {
+		// too big to cache; stream it, releasing the reservation on Close
 		slog.InfoContext(ctx,
 			"Image is too large to cache, streaming",
 			slog.String("ref", ref),
-			slog.Int64("max_bytes", c.cache.maxBytes),
+			slog.Int64("max_entry_bytes", reserved),
 		)
-		return body, nil
+		return newReadCloser(
+			io.MultiReader(bytes.NewReader(buf), tarData),
+			closerFunc(func() error {
+				c.cache.release(reserved)
+				return tarData.Close()
+			}),
+		), nil
 	}
 
-	if c.cache.add(requestedDigest.DigestStr(), cacheData) {
-		slog.InfoContext(
-			ctx,
-			"Populated image cache",
-			slog.String("ref", ref),
-			slog.String("digest", requestedDigest.DigestStr()),
-			slog.Int("bytes", len(cacheData)),
-		)
-	}
+	c.cache.commit(requestedDigest.DigestStr(), buf, reserved)
+	slog.InfoContext(
+		ctx,
+		"Populated image cache",
+		slog.String("ref", ref),
+		slog.String("digest", requestedDigest.DigestStr()),
+		slog.Int("bytes", len(buf)),
+	)
 
-	return body, nil
+	return io.NopCloser(bytes.NewReader(buf)), nil
 }
 
-// readBoundedForCache reads up to limit+1 bytes from r. If the stream ends within
-// limit, the whole content is returned as cacheData and r is closed; otherwise
-// cacheData is nil and body streams the buffered prefix followed by the rest of
-// r, closing r on Close. body always yields the full content once.
-func readBoundedForCache(r io.ReadCloser, limit int64) (cacheData []byte, body io.ReadCloser, err error) {
-	buf, err := io.ReadAll(io.LimitReader(r, limit+1))
+// readUpTo reads up to limit+1 bytes from r. If the stream ends within limit it
+// returns the whole content with more=false and closes r; otherwise it returns
+// the first limit+1 bytes with more=true, leaving r open for the caller to stream
+// buf then the rest. On error r is closed.
+func readUpTo(r io.ReadCloser, limit int64) (buf []byte, more bool, err error) {
+	buf, err = io.ReadAll(io.LimitReader(r, limit+1))
 	if err != nil {
 		_ = r.Close()
-		return nil, nil, err
+		return nil, false, err
 	}
-
 	if int64(len(buf)) > limit {
-		// Too large to cache; r is closed by the caller via body.Close.
-		return nil, newReadCloser(io.MultiReader(bytes.NewReader(buf), r), r), nil
+		return buf, true, nil
 	}
-
-	// The whole content is in buf; r is fully consumed and can be closed now.
 	if cerr := r.Close(); cerr != nil {
-		return nil, nil, cerr
+		return nil, false, cerr
 	}
-	return buf, io.NopCloser(bytes.NewReader(buf)), nil
+	return buf, false, nil
 }
 
 // newReadCloser pairs a Reader with an independent Closer.
@@ -195,6 +207,11 @@ func newReadCloser(r io.Reader, c io.Closer) io.ReadCloser {
 		io.Closer
 	}{r, c}
 }
+
+// closerFunc adapts a function to io.Closer.
+type closerFunc func() error
+
+func (f closerFunc) Close() error { return f() }
 
 func registryHost(ref string) string {
 	parts := strings.SplitN(ref, "/", 2)
