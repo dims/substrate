@@ -215,8 +215,30 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	// Build the actor's writable rootfs as a raw ext4 virtio-blk disk from the
 	// atelet-populated OCI bundle rootfs. This becomes /dev/vdb.
 	diskPath := filepath.Join(actorDir, actorRootfsDiskName)
-	if err := kata.BuildExt4Image(ctx, filepath.Join(bundle, "rootfs"), diskPath); err != nil {
-		return nil, fmt.Errorf("while building actor rootfs disk: %w", err)
+	// Building a multi-GB rootfs via mkfs.ext4 -d can take minutes and exceed the
+	// caller's resume RPC deadline, which would SIGKILL mkfs mid-write and leave a
+	// corrupt disk. Build on a deadline-detached context to a unique temp file,
+	// then atomically rename it into place; skip entirely if a prior build already
+	// produced the disk. Idempotent + crash-safe across the controller's retries.
+	if _, statErr := os.Stat(diskPath); statErr != nil {
+		buildCtx, buildCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+		tmp, tmpErr := os.CreateTemp(actorDir, "rootfs-*.ext4.building")
+		if tmpErr != nil {
+			buildCancel()
+			return nil, fmt.Errorf("while creating temp rootfs disk: %w", tmpErr)
+		}
+		tmpPath := tmp.Name()
+		_ = tmp.Close()
+		if err := kata.BuildExt4Image(buildCtx, filepath.Join(bundle, "rootfs"), tmpPath); err != nil {
+			buildCancel()
+			_ = os.Remove(tmpPath)
+			return nil, fmt.Errorf("while building actor rootfs disk: %w", err)
+		}
+		buildCancel()
+		if err := os.Rename(tmpPath, diskPath); err != nil {
+			_ = os.Remove(tmpPath)
+			return nil, fmt.Errorf("while finalizing actor rootfs disk: %w", err)
+		}
 	}
 
 	// Sizing + agent params from the kata config.
@@ -866,7 +888,13 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		slog.InfoContext(ctx, "Reset actor rootfs disk to golden (template)", slog.String("id", id))
 	} else {
 		bundleRootfs := filepath.Join(ateompath.OCIBundlePath(ns, name, id, containers[0].GetName()), "rootfs")
-		if err := kata.BuildExt4Image(ctx, bundleRootfs, diskPath); err != nil {
+		// Detach from the resume RPC deadline: reconstructing a multi-GB rootfs via
+		// mkfs.ext4 -d can take minutes and would otherwise be SIGKILLed mid-write.
+		// (Unlike the golden boot this is reset-each-restore, so it always rebuilds.)
+		rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+		err := kata.BuildExt4Image(rbCtx, bundleRootfs, diskPath)
+		rbCancel()
+		if err != nil {
 			return nil, fmt.Errorf("while reconstructing rootfs disk from image: %w", err)
 		}
 		slog.InfoContext(ctx, "Reconstructed actor rootfs disk from image", slog.String("id", id))

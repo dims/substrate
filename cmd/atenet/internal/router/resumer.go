@@ -44,7 +44,9 @@ func (r *ActorResumer) ResumeActor(ctx context.Context, actorID string) (*ateapi
 		// We detach the context from the first caller using a fixed background timeout.
 		// This guarantees that if Caller 1 disconnects or times out, the underlying
 		// resume operation continues running for Caller 2 and Caller 3 without failing.
-		bgCtx, bgCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		// Generous (5m): a micro-VM resume can reconstruct a multi-GB rootfs disk
+		// (mkfs.ext4 -d), which takes minutes for large workload images.
+		bgCtx, bgCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer bgCancel()
 
 		backoff := wait.Backoff{

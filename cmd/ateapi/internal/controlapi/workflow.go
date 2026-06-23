@@ -152,8 +152,9 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, id string, boot bool) (
 	state := &ResumeState{}
 
 	// Acquire lock and get the timeout context for the workflow
-	// Lock TTL is 7 seconds, with 2 seconds padding for workflow timeout
-	ctx, releaseLock, err := w.acquireActorLock(ctx, id, 30*time.Second, 2*time.Second)
+	// Lock TTL 5m / 15s padding: a fresh golden BOOT builds the actor rootfs
+	// (mkfs.ext4 -d), which takes minutes for large multi-GB workload images.
+	ctx, releaseLock, err := w.acquireActorLock(ctx, id, 5*time.Minute, 15*time.Second)
 	if err != nil {
 		return nil, err
 	}
