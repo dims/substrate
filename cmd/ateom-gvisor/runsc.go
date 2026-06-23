@@ -57,8 +57,11 @@ func (r *runsc) gpuGlobalFlags() []string {
 // checkpointed (pause for substrate's root sandbox). pause is the
 // k8s pause image, distroless, no /bin/sh. So a wrapper script
 // can't execute there. We drain CUDA externally via cmdDrainCUDA
-// (runsc exec supervisor cuda-checkpoint --toggle --pid 1) just
-// before cmdCheckpoint.
+// (runsc exec supervisor cuda-checkpoint-wrapper.sh) just before
+// cmdCheckpoint — the wrapper runs in the supervisor container
+// (which has /bin/sh) and toggles every CUDA-holding pid. The
+// workload is a child of the supervisor (pid 1), so a fixed
+// --pid 1 would miss it ("initialization error").
 func (r *runsc) gpuSaveRestoreFlags() []string {
 	return nil
 }
@@ -80,7 +83,7 @@ func (r *runsc) cmdDrainCUDA(ctx context.Context) error {
 		"exec",
 		"--", // marker for argv passthrough
 		"supervisor",
-		"/usr/local/bin/cuda-checkpoint", "--toggle", "--pid", "1",
+		cudaCheckpointWrapperPath,
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -106,7 +109,7 @@ func (r *runsc) cmdUntoggleCUDA(ctx context.Context) error {
 		"exec",
 		"--",
 		"supervisor",
-		"/usr/local/bin/cuda-checkpoint", "--toggle", "--pid", "1",
+		cudaCheckpointWrapperPath,
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
