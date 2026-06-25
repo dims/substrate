@@ -229,6 +229,11 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		}
 		tmpPath := tmp.Name()
 		_ = tmp.Close()
+		if err := writeGuestResolvConf(filepath.Join(bundle, "rootfs")); err != nil {
+			buildCancel()
+			_ = os.Remove(tmpPath)
+			return nil, fmt.Errorf("while writing guest resolv.conf: %w", err)
+		}
 		if err := kata.BuildExt4Image(buildCtx, filepath.Join(bundle, "rootfs"), tmpPath); err != nil {
 			buildCancel()
 			_ = os.Remove(tmpPath)
@@ -588,6 +593,32 @@ func ensureKataCompatibleSpec(bundle, id, netnsPath string) (*specs.Spec, error)
 	return &spec, nil
 }
 
+// writeGuestResolvConf gives the micro-VM guest working DNS by writing
+// /etc/resolv.conf into the bundle rootfs before it is packed into the ext4
+// disk. ateom drops atelet's /etc/resolv.conf bind (a host bind is meaningless
+// inside a VM) and does not send CreateSandbox.Dns, so without this the guest
+// can reach IP literals but cannot resolve names. We copy the worker pod's own
+// resolv.conf (cluster DNS) verbatim -- the same source the kata shim's getDNS
+// uses -- so the guest resolves both cluster and external names (e.g. ollama.com)
+// out over the pod's NAT'd egress. Writing the file also satisfies the kata
+// agent's requirement that /etc/resolv.conf already exist before it populates DNS.
+func writeGuestResolvConf(rootfs string) error {
+	content, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil || len(strings.TrimSpace(string(content))) == 0 {
+		// The worker pod always has a resolv.conf; this guard only trips in a
+		// degenerate environment, so the guest is never left without a resolver.
+		content = []byte("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
+	}
+	etc := filepath.Join(rootfs, "etc")
+	if err := os.MkdirAll(etc, 0o755); err != nil {
+		return fmt.Errorf("creating %q: %w", etc, err)
+	}
+	if err := os.WriteFile(filepath.Join(etc, "resolv.conf"), content, 0o644); err != nil {
+		return fmt.Errorf("writing guest resolv.conf: %w", err)
+	}
+	return nil
+}
+
 // defaultKataMounts mirrors the mount set `ctr run --runtime io.containerd.kata.v2`
 // produces (the proven-good shape for the kata agent).
 func defaultKataMounts() []specs.Mount {
@@ -888,6 +919,9 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		slog.InfoContext(ctx, "Reset actor rootfs disk to golden (template)", slog.String("id", id))
 	} else {
 		bundleRootfs := filepath.Join(ateompath.OCIBundlePath(ns, name, id, containers[0].GetName()), "rootfs")
+		if err := writeGuestResolvConf(bundleRootfs); err != nil {
+			return nil, fmt.Errorf("while writing guest resolv.conf: %w", err)
+		}
 		// Detach from the resume RPC deadline: reconstructing a multi-GB rootfs via
 		// mkfs.ext4 -d can take minutes and would otherwise be SIGKILLed mid-write.
 		// (Unlike the golden boot this is reset-each-restore, so it always rebuilds.)
