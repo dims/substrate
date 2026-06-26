@@ -156,8 +156,10 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, id string, boot bool) (
 	state := &ResumeState{}
 
 	// Acquire lock and get the timeout context for the workflow
-	// Lock TTL is 7 seconds, with 2 seconds padding for workflow timeout
-	ctx, releaseLock, err := w.acquireActorLock(ctx, id, 30*time.Second, 2*time.Second)
+	// Lock TTL 5m / 15s padding: a micro-VM resume can copy/rebuild a multi-GB
+	// rootfs disk (mkfs.ext4 -d) + restore the VM, which takes minutes for large
+	// workload images (e.g. the ~3GB OpenShell helpdesk). Suspend/delete stay short.
+	ctx, releaseLock, err := w.acquireActorLock(ctx, id, 5*time.Minute, 15*time.Second)
 	if err != nil {
 		return nil, err
 	}
