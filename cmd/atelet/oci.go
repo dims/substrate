@@ -193,7 +193,7 @@ func buildActorOCISpec(args []string, env []string, annotations map[string]strin
 			Path:     "rootfs",
 			Readonly: false,
 		},
-		Hostname: "runsc",
+		Hostname: "actor",
 		Mounts:   mounts,
 		Linux: &specs.Linux{
 			Namespaces: []specs.LinuxNamespace{
@@ -256,7 +256,7 @@ func validateTarName(name string) (cleaned string, skip bool, err error) {
 }
 
 func untar(ctx context.Context, tarData io.Reader, rootPath string) error {
-	tracer := otel.Tracer("ateom-gvisor")
+	tracer := otel.Tracer("atelet")
 	ctx, span := tracer.Start(ctx, "untar")
 	defer span.End()
 
