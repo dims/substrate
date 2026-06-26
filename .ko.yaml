@@ -29,3 +29,7 @@ baseImageOverrides:
   # e2fsprogs) and overrides this base at build time via KO_CONFIG_PATH, so running
   # the demo never edits this file. The committed default stays debian:stable-slim.
   github.com/agent-substrate/substrate/cmd/ateom-microvm: debian:stable-slim
+  # ateom-uvm is a clone of ateom-microvm used to demo a pluggable, separately-named
+  # backend selected purely by WorkerPool.ateomImage; it has the same e2fsprogs/glibc
+  # base needs. hack/run-uvm-demo.sh overrides this at build time the same way.
+  github.com/agent-substrate/substrate/cmd/ateom-uvm: debian:stable-slim
