@@ -105,7 +105,12 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		if err := writeGuestResolvConf(bundleRootfs); err != nil {
 			return nil, fmt.Errorf("while writing guest resolv.conf: %w", err)
 		}
-		if err := kata.BuildExt4Image(ctx, bundleRootfs, diskPath); err != nil {
+		// Detach from the resume RPC deadline: reconstructing a multi-GB rootfs via
+		// mkfs.ext4 -d can take minutes and would otherwise be SIGKILLed mid-write.
+		rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+		err := kata.BuildExt4Image(rbCtx, bundleRootfs, diskPath)
+		rbCancel()
+		if err != nil {
 			return nil, fmt.Errorf("while reconstructing rootfs disk from image: %w", err)
 		}
 		slog.InfoContext(ctx, "Reconstructed actor rootfs disk from image", slog.String("id", id))

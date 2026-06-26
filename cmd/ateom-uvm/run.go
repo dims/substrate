@@ -242,8 +242,31 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	if err := writeGuestResolvConf(filepath.Join(bundle, "rootfs")); err != nil {
 		return nil, fmt.Errorf("while writing guest resolv.conf: %w", err)
 	}
-	if err := kata.BuildExt4Image(ctx, filepath.Join(bundle, "rootfs"), diskPath); err != nil {
-		return nil, fmt.Errorf("while building actor rootfs disk: %w", err)
+	// Building a multi-GB rootfs via mkfs.ext4 -d can take minutes and exceed the
+	// caller's resume RPC deadline, which would SIGKILL mkfs mid-write and leave a
+	// corrupt disk. Build on a deadline-detached context to a unique temp file, then
+	// atomically rename it into place; skip if a prior build already produced it.
+	// Idempotent + crash-safe across the controller's retries (needed for the ~3GB
+	// OpenShell helpdesk image).
+	if _, statErr := os.Stat(diskPath); statErr != nil {
+		buildCtx, buildCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+		tmp, tmpErr := os.CreateTemp(actorDir, "rootfs-*.ext4.building")
+		if tmpErr != nil {
+			buildCancel()
+			return nil, fmt.Errorf("while creating temp rootfs disk: %w", tmpErr)
+		}
+		tmpPath := tmp.Name()
+		_ = tmp.Close()
+		if err := kata.BuildExt4Image(buildCtx, filepath.Join(bundle, "rootfs"), tmpPath); err != nil {
+			buildCancel()
+			_ = os.Remove(tmpPath)
+			return nil, fmt.Errorf("while building actor rootfs disk: %w", err)
+		}
+		buildCancel()
+		if err := os.Rename(tmpPath, diskPath); err != nil {
+			_ = os.Remove(tmpPath)
+			return nil, fmt.Errorf("while finalizing actor rootfs disk: %w", err)
+		}
 	}
 
 	// Guest sizing + agent kernel params from the kata config.
