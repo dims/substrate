@@ -61,6 +61,7 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool) *appsv1ac.Deployment
 
 	applyWorkerPoolPodTemplate(podSpecAC, containerAC, wp.Spec.Template)
 	maybeApplyMicroVMPodShape(podSpecAC, containerAC, wp.Spec.SandboxClass)
+	maybeApplyGPUPodShape(podSpecAC, containerAC, wp.Spec.Template)
 	podSpecAC.WithContainers(containerAC)
 
 	return appsv1ac.Deployment(wp.Name, wp.Namespace).
@@ -127,6 +128,43 @@ func maybeApplyMicroVMPodShape(
 		WithOperator(corev1.TolerationOpEqual).
 		WithValue(string(atev1alpha1.SandboxClassMicroVM)).
 		WithEffect(corev1.TaintEffectNoSchedule))
+}
+
+// nvidiaToolkitHostPath is where the NVIDIA container toolkit lives on GPU nodes.
+// ateom-gvisor's toolkitDir constant must match.
+const nvidiaToolkitHostPath = "/usr/local/nvidia/toolkit"
+
+func maybeApplyGPUPodShape(
+	podSpecAC *corev1ac.PodSpecApplyConfiguration,
+	containerAC *corev1ac.ContainerApplyConfiguration,
+	tmpl *atev1alpha1.WorkerPoolPodTemplate,
+) {
+	if !templateRequestsGPU(tmpl) {
+		return
+	}
+	containerAC.WithVolumeMounts(corev1ac.VolumeMount().
+		WithName("nvidia-toolkit").
+		WithMountPath(nvidiaToolkitHostPath).
+		WithReadOnly(true))
+	podSpecAC.WithVolumes(corev1ac.Volume().
+		WithName("nvidia-toolkit").
+		WithHostPath(corev1ac.HostPathVolumeSource().
+			WithPath(nvidiaToolkitHostPath).
+			WithType(corev1.HostPathDirectory)))
+}
+
+func templateRequestsGPU(tmpl *atev1alpha1.WorkerPoolPodTemplate) bool {
+	if tmpl == nil || tmpl.Resources == nil {
+		return false
+	}
+	const gpu = corev1.ResourceName("nvidia.com/gpu")
+	if q, ok := tmpl.Resources.Limits[gpu]; ok && !q.IsZero() {
+		return true
+	}
+	if q, ok := tmpl.Resources.Requests[gpu]; ok && !q.IsZero() {
+		return true
+	}
+	return false
 }
 
 func applyWorkerPoolPodTemplate(

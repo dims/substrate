@@ -238,6 +238,9 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		if err := imagecache.SetupBundleRootfs(ateompath.OCIBundlePath(req.GetActorUid(), ac.GetName())); err != nil {
 			return nil, fmt.Errorf("while composing %q rootfs: %w", ac.GetName(), err)
 		}
+		if err := maybeInjectGPU(ctx, req.GetActorUid(), ac.GetName()); err != nil {
+			return nil, fmt.Errorf("while injecting GPU for %q: %w", ac.GetName(), err)
+		}
 		if err := rcmd.cmdCreate(ctx, pw, ac.GetName(), nil); err != nil {
 			return nil, fmt.Errorf("while creating %q application container: %w", ac.GetName(), err)
 		}
@@ -450,6 +453,9 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		defer pw.Close()
 		if err := imagecache.SetupBundleRootfs(ateompath.OCIBundlePath(req.GetActorUid(), ac.GetName())); err != nil {
 			return nil, fmt.Errorf("while composing %q rootfs: %w", ac.GetName(), err)
+		}
+		if err := maybeInjectGPU(ctx, req.GetActorUid(), ac.GetName()); err != nil {
+			return nil, fmt.Errorf("while injecting GPU for %q: %w", ac.GetName(), err)
 		}
 		switch req.GetScope() {
 		case ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA:

@@ -261,6 +261,61 @@ func TestMicroVMPodShape(t *testing.T) {
 	}
 }
 
+func TestGPUPoolMountsToolkit(t *testing.T) {
+	gpu := resource.MustParse("1")
+	wp := &atev1alpha1.WorkerPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "wp", Namespace: "ns"},
+		Spec: atev1alpha1.WorkerPoolSpec{
+			AteomImage: "img",
+			Template: &atev1alpha1.WorkerPoolPodTemplate{
+				Resources: &corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{"nvidia.com/gpu": gpu},
+				},
+			},
+		},
+	}
+	dep := buildDeploymentApplyConfig(wp)
+	pod := dep.Spec.Template.Spec
+
+	var found bool
+	for _, v := range pod.Volumes {
+		if v.Name != nil && *v.Name == "nvidia-toolkit" {
+			found = true
+			if v.HostPath == nil || *v.HostPath.Path != "/usr/local/nvidia/toolkit" {
+				t.Fatalf("nvidia-toolkit volume has wrong hostPath: %+v", v.HostPath)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected nvidia-toolkit volume on a GPU pool")
+	}
+
+	var mounted bool
+	for _, c := range pod.Containers {
+		for _, m := range c.VolumeMounts {
+			if m.Name != nil && *m.Name == "nvidia-toolkit" && *m.MountPath == "/usr/local/nvidia/toolkit" {
+				mounted = true
+			}
+		}
+	}
+	if !mounted {
+		t.Fatal("expected nvidia-toolkit mount on the ateom container")
+	}
+}
+
+func TestNonGPUPoolHasNoToolkit(t *testing.T) {
+	wp := &atev1alpha1.WorkerPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "wp", Namespace: "ns"},
+		Spec:       atev1alpha1.WorkerPoolSpec{AteomImage: "img"},
+	}
+	dep := buildDeploymentApplyConfig(wp)
+	for _, v := range dep.Spec.Template.Spec.Volumes {
+		if v.Name != nil && *v.Name == "nvidia-toolkit" {
+			t.Fatal("non-GPU pool must not mount the toolkit")
+		}
+	}
+}
+
 func testWorkerPoolApplyConfig(tmpl *atev1alpha1.WorkerPoolPodTemplate) *atev1alpha1.WorkerPool {
 	return &atev1alpha1.WorkerPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default", UID: "uid"},
