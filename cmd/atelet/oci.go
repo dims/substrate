@@ -20,6 +20,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/agent-substrate/substrate/internal/ateerrors"
@@ -124,13 +125,17 @@ func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, acto
 		return err
 	}
 
-	// Argv and env need only the image config; resolve them before writing
-	// any spec so an invalid container config fails fast.
+	// Argv, env and user need only the image config; resolve them before
+	// writing any spec so an invalid container config fails fast.
 	resolvedArgs, err := resolveProcessArgs(&img.Config, command, args)
 	if err != nil {
 		return fmt.Errorf("while resolving process args for container %q: %w", containerName, err)
 	}
 	resolvedEnv := resolveActorEnv(&img.Config, env)
+	uid, gid, err := resolveUser(&img.Config)
+	if err != nil {
+		return fmt.Errorf("while resolving user for container %q: %w", containerName, err)
+	}
 
 	// Every bind target must exist in the rootfs for the mount to attach;
 	// ateom creates them through the mounted overlay (they land in the
@@ -159,6 +164,8 @@ func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, acto
 		VolumeMounts:  volumeMounts,
 		Capabilities:  capabilities,
 		Resources:     resources,
+		UID:           uid,
+		GID:           gid,
 	})); err != nil {
 		return fmt.Errorf("while writing OCI spec: %w", err)
 	}
@@ -263,4 +270,38 @@ func resolveProcessArgs(imageCfg *v1.Config, command, args []string) ([]string, 
 		return nil, fmt.Errorf("%w: no command specified: image defines neither ENTRYPOINT nor CMD and the container sets neither command nor args", ateerrors.ReasonInvalidContainerConfig)
 	}
 	return argv, nil
+}
+
+// resolveUser computes the process identity a container starts as, from the
+// image's own Config.User (the OCI image spec's "user[:group]" form; Docker's
+// USER instruction sets exactly this field). An empty or absent User is root
+// (0:0), matching every other container runtime's default for an image that
+// declares none.
+//
+// ponytail: numeric UIDs/GIDs only ("65532:65532", "1000"). Resolving a named
+// user or group ("USER nonroot") needs a passwd/group lookup against the
+// image's own pulled rootfs, which no caller of this function has parsed at
+// this point in the pipeline. Fail loudly instead of silently running the
+// container as root, which is what every actor container did unconditionally
+// before this function existed.
+func resolveUser(imageCfg *v1.Config) (uid, gid uint32, err error) {
+	if imageCfg == nil || imageCfg.User == "" {
+		return 0, 0, nil
+	}
+	uidStr, gidStr, hasGroup := strings.Cut(imageCfg.User, ":")
+	parsedUID, err := strconv.ParseUint(uidStr, 10, 32)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%w: image User %q is not a numeric uid[:gid]: named users are not resolved from the image's passwd file", ateerrors.ReasonInvalidContainerConfig, imageCfg.User)
+	}
+	if !hasGroup {
+		// No explicit group: run with GID equal to UID, matching the common
+		// minimal-image convention (e.g. distroless's own uid=gid=65532
+		// "nonroot" user) rather than defaulting to GID 0 (root's group).
+		return uint32(parsedUID), uint32(parsedUID), nil
+	}
+	parsedGID, err := strconv.ParseUint(gidStr, 10, 32)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%w: image User %q is not a numeric uid[:gid]: named groups are not resolved from the image's group file", ateerrors.ReasonInvalidContainerConfig, imageCfg.User)
+	}
+	return uint32(parsedUID), uint32(parsedGID), nil
 }

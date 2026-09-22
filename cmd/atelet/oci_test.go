@@ -158,6 +158,71 @@ func TestResolveProcessArgs(t *testing.T) {
 	}
 }
 
+func TestResolveUser(t *testing.T) {
+	tests := []struct {
+		name    string
+		image   *v1.Config
+		wantUID uint32
+		wantGID uint32
+		wantErr bool
+	}{
+		{
+			name:  "no image config defaults to root",
+			image: nil,
+		},
+		{
+			name:  "empty User defaults to root",
+			image: &v1.Config{User: ""},
+		},
+		{
+			name:    "uid:gid both explicit",
+			image:   &v1.Config{User: "65532:65532"},
+			wantUID: 65532,
+			wantGID: 65532,
+		},
+		{
+			name:    "uid only, gid defaults to the same value",
+			image:   &v1.Config{User: "1000"},
+			wantUID: 1000,
+			wantGID: 1000,
+		},
+		{
+			name:    "uid:gid with different values",
+			image:   &v1.Config{User: "1000:2000"},
+			wantUID: 1000,
+			wantGID: 2000,
+		},
+		{
+			name:    "named user is not resolved and errors",
+			image:   &v1.Config{User: "nonroot"},
+			wantErr: true,
+		},
+		{
+			name:    "named group is not resolved and errors",
+			image:   &v1.Config{User: "1000:nonroot"},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotUID, gotGID, err := resolveUser(tc.image)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("resolveUser(%v) err = %v, wantErr %v", tc.image, err, tc.wantErr)
+			}
+			if err != nil {
+				if !errors.Is(err, ateerrors.ReasonInvalidContainerConfig) {
+					t.Errorf("named user/group error must carry ReasonInvalidContainerConfig, got: %v", err)
+				}
+				return
+			}
+			if gotUID != tc.wantUID || gotGID != tc.wantGID {
+				t.Errorf("resolveUser(%v) = (%d, %d), want (%d, %d)", tc.image, gotUID, gotGID, tc.wantUID, tc.wantGID)
+			}
+		})
+	}
+}
+
 // wantDefaultCapabilities is the set a container gets when it asks for no
 // adjustment. It is spelled out rather than derived from defaultCapabilities so
 // that widening or narrowing the default is a deliberate test change.
