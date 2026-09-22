@@ -77,7 +77,7 @@ func resolveCapabilities(caps *ateletpb.Capabilities) []string {
 	return out
 }
 
-func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, actorUID, containerName, ref string, command, args []string, env []string, netns string, volumes []*ateletpb.Volume, volumeMounts []*ateletpb.VolumeMount, capabilities []string, resources *ateletpb.ResourceLimits) error {
+func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, actorUID, containerName, ref string, command, args []string, env []string, netns string, volumes []*ateletpb.Volume, volumeMounts []*ateletpb.VolumeMount, capabilities []string, resources *ateletpb.ResourceLimits, runAsRoot bool) error {
 	tracer := otel.Tracer("prepareOCIDirectory")
 
 	ctx, span := tracer.Start(ctx, "prepareOCIDirectory")
@@ -132,9 +132,21 @@ func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, acto
 		return fmt.Errorf("while resolving process args for container %q: %w", containerName, err)
 	}
 	resolvedEnv := resolveActorEnv(&img.Config, env)
-	uid, gid, err := resolveUser(&img.Config)
-	if err != nil {
-		return fmt.Errorf("while resolving user for container %q: %w", containerName, err)
+	var uid, gid uint32
+	if runAsRoot {
+		// Sandbox infra (the pause container) always runs as root regardless
+		// of what its own image declares: gVisor's sandbox init process
+		// fails to boot under a non-root UID (observed with
+		// registry.k8s.io/pause:3.10.2, which sets USER 65535:65535 and
+		// works fine as the init process of a non-gVisor runtime). The
+		// pause container is Substrate's own choice of infra, not tenant
+		// code, so its identity is Substrate's to fix, not the image's.
+		uid, gid = 0, 0
+	} else {
+		uid, gid, err = resolveUser(&img.Config)
+		if err != nil {
+			return fmt.Errorf("while resolving user for container %q: %w", containerName, err)
+		}
 	}
 
 	// Every bind target must exist in the rootfs for the mount to attach;
