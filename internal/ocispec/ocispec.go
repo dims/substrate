@@ -144,6 +144,12 @@ func Build(o Options) *specs.Spec {
 			},
 		},
 		Linux: &specs.Linux{
+			// defaultCapabilities grants NET_BIND_SERVICE, so an actor can
+			// already bind a privileged port. A container that drops all
+			// capabilities loses that; this is the capability-free equivalent,
+			// and the actor owns its whole network namespace either way.
+			// Kubernetes classes this sysctl as safe.
+			Sysctl: map[string]string{"net.ipv4.ip_unprivileged_port_start": "0"},
 			Namespaces: []specs.LinuxNamespace{
 				{
 					Type: "pid",
