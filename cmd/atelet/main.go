@@ -1433,6 +1433,13 @@ func (s *AteomHerder) prepareOCIBundles(
 			if err := os.MkdirAll(volPath, 0o700); err != nil {
 				return fmt.Errorf("while creating %q: %w", volPath, err)
 			}
+			// One actor's containers can run as different users, so no single
+			// owner works: 0777, as Kubernetes gives an emptyDir. At 0700 a
+			// non-root container cannot write its own volume. Chmod because
+			// MkdirAll applies the umask and skips existing dirs.
+			if err := os.Chmod(volPath, 0o777); err != nil {
+				return fmt.Errorf("while setting mode of %q: %w", volPath, err)
+			}
 		}
 	}
 
