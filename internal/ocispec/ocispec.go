@@ -97,6 +97,21 @@ func Build(o Options) *specs.Spec {
 			Args: o.Args,
 			Env:  o.Env,
 			Cwd:  "/",
+			// An actor container never needs to gain privileges it was not
+			// started with, so a setuid/setgid bit or a file capability on a
+			// binary in its image must not be honored. Unset, the spec claimed
+			// the opposite of the posture everything around it takes: a
+			// three-capability default set, no ambient capabilities, and the
+			// image's own non-root USER. gVisor already ignores SUID/SGID
+			// regardless (runsc runs with --allow-suid disabled), so this only
+			// makes the spec state what that runtime already enforced; on
+			// micro-VM it is a real restriction, and the kata agent honors it
+			// (internal/kata/specconv.go forwards the field).
+			//
+			// ponytail: unconditional, because nothing can ask for the other
+			// behavior — SecurityContext has no field for it. A workload that
+			// genuinely needs setuid inside its sandbox would need one added.
+			NoNewPrivileges: true,
 			Capabilities: &specs.LinuxCapabilities{
 				Bounding:  o.Capabilities,
 				Effective: o.Capabilities,
