@@ -47,11 +47,8 @@ type Options struct {
 	Capabilities []string
 	// Resources are the container's own declared limits, or nil for none.
 	Resources *ateletpb.ResourceLimits
-	// UID and GID are the process identity the container starts as, resolved
-	// from the image's own Config.User (see resolveUser in cmd/atelet/oci.go).
-	// Zero for both is a valid, explicit choice (root), not just an unset
-	// zero value: an image with no USER directive runs as root, matching
-	// every other container runtime's default.
+	// UID and GID come from the image's own Config.User (see resolveUser in
+	// cmd/atelet/oci.go). Zero is a real choice (root), not just unset.
 	UID uint32
 	GID uint32
 }
@@ -97,20 +94,9 @@ func Build(o Options) *specs.Spec {
 			Args: o.Args,
 			Env:  o.Env,
 			Cwd:  "/",
-			// An actor container never needs to gain privileges it was not
-			// started with, so a setuid/setgid bit or a file capability on a
-			// binary in its image must not be honored. Unset, the spec claimed
-			// the opposite of the posture everything around it takes: a
-			// three-capability default set, no ambient capabilities, and the
-			// image's own non-root USER. gVisor already ignores SUID/SGID
-			// regardless (runsc runs with --allow-suid disabled), so this only
-			// makes the spec state what that runtime already enforced; on
-			// micro-VM it is a real restriction, and the kata agent honors it
-			// (internal/kata/specconv.go forwards the field).
-			//
-			// ponytail: unconditional, because nothing can ask for the other
-			// behavior — SecurityContext has no field for it. A workload that
-			// genuinely needs setuid inside its sandbox would need one added.
+			// Actor containers never need to gain privileges on exec, so setuid
+			// bits and file capabilities must not be honored. gVisor ignores
+			// SUID anyway; on micro-VM the kata agent enforces this.
 			NoNewPrivileges: true,
 			Capabilities: &specs.LinuxCapabilities{
 				Bounding:  o.Capabilities,

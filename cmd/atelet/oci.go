@@ -134,13 +134,9 @@ func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, acto
 	resolvedEnv := resolveActorEnv(&img.Config, env)
 	var uid, gid uint32
 	if runAsRoot {
-		// Sandbox infra (the pause container) always runs as root regardless
-		// of what its own image declares: gVisor's sandbox init process
-		// fails to boot under a non-root UID (observed with
-		// registry.k8s.io/pause:3.10.2, which sets USER 65535:65535 and
-		// works fine as the init process of a non-gVisor runtime). The
-		// pause container is Substrate's own choice of infra, not tenant
-		// code, so its identity is Substrate's to fix, not the image's.
+		// The pause container is our own infra, not tenant code, and gVisor's
+		// sandbox init cannot boot non-root. pause:3.10.2 declares
+		// USER 65535:65535, which works everywhere except here.
 		uid, gid = 0, 0
 	} else {
 		uid, gid, err = resolveUser(&img.Config)
@@ -284,18 +280,11 @@ func resolveProcessArgs(imageCfg *v1.Config, command, args []string) ([]string, 
 	return argv, nil
 }
 
-// resolveUser computes the process identity a container starts as, from the
-// image's own Config.User (the OCI image spec's "user[:group]" form; Docker's
-// USER instruction sets exactly this field). An empty or absent User is root
-// (0:0), matching every other container runtime's default for an image that
-// declares none.
-//
-// ponytail: numeric UIDs/GIDs only ("65532:65532", "1000"). Resolving a named
-// user or group ("USER nonroot") needs a passwd/group lookup against the
-// image's own pulled rootfs, which no caller of this function has parsed at
-// this point in the pipeline. Fail loudly instead of silently running the
-// container as root, which is what every actor container did unconditionally
-// before this function existed.
+// resolveUser reads the identity a container starts as from the image's own
+// Config.User ("uid[:gid]", what Docker's USER sets). Absent means root, as
+// with every other runtime. Numeric only: resolving a name needs the image's
+// passwd file, which nothing here has parsed, so fail loudly rather than
+// silently fall back to root.
 func resolveUser(imageCfg *v1.Config) (uid, gid uint32, err error) {
 	if imageCfg == nil || imageCfg.User == "" {
 		return 0, 0, nil
