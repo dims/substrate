@@ -72,6 +72,22 @@ func SetupBundleRootfs(bundlePath string) error {
 	// means nothing was mounted there.
 	_ = unix.Unmount(rootfs, unix.MNT_DETACH)
 
+	// Whichever of these supplies the merged root's attributes becomes the
+	// container's "/", so a non-root workload has to be able to traverse it:
+	// with an overlay that is upper, which shadows every lower layer's root
+	// (see implicitdirs.go for the same shadowing one level down); with no
+	// layers to mount it is rootfs itself. Set the mode explicitly — MkdirAll
+	// applies the umask and leaves an already-existing dir alone — to the same
+	// 0755 unpackLayerToPool gives a layer root. Left at 0700, every container
+	// declaring a non-root USER fails to exec anything at all, because it
+	// cannot search its own root directory. This has to follow the unmount
+	// above, or it would chmod through a stale mount instead.
+	for _, d := range []string{rootfs, upper} {
+		if err := os.Chmod(d, 0o755); err != nil {
+			return fmt.Errorf("while setting mode of %q: %w", d, err)
+		}
+	}
+
 	if len(spec.Layers) == 0 {
 		// Degenerate zero-layer image: the empty rootfs dir plus ExtraDirs is
 		// all there is.
