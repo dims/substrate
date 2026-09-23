@@ -70,8 +70,24 @@ func ShapeMicroVM(spec *specs.Spec, o MicroVMOptions) error {
 	}
 	spec.Mounts = append(guestSystemMounts(), volumes...)
 
+	if spec.Process != nil {
+		// Actor containers never need to gain privileges on exec, so setuid bits
+		// and file capabilities must not be honored. The kata agent enforces it.
+		spec.Process.NoNewPrivileges = true
+	}
+
 	if spec.Linux == nil {
 		spec.Linux = &specs.Linux{}
+	}
+	// defaultCapabilities grants NET_BIND_SERVICE, so an actor can already bind
+	// a privileged port. A container that drops all capabilities loses that;
+	// this is the capability-free equivalent, and the actor owns its whole
+	// network namespace either way. Kubernetes classes this sysctl as safe.
+	if spec.Linux.Sysctl == nil {
+		spec.Linux.Sysctl = map[string]string{}
+	}
+	if _, ok := spec.Linux.Sysctl["net.ipv4.ip_unprivileged_port_start"]; !ok {
+		spec.Linux.Sysctl["net.ipv4.ip_unprivileged_port_start"] = "0"
 	}
 	// The container's own declared limits survive the merge; StartRootfsContainer
 	// sets CgroupsPath.

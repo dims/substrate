@@ -152,3 +152,29 @@ func TestShapeMicroVM_LeavesUndeclaredContainerUnlimited(t *testing.T) {
 		t.Errorf("cpu quota = %d, want unset for a container that declared none", *c.Quota)
 	}
 }
+
+// Both fields belong to the guest and to nothing else. Setting them in Build
+// would put them in every runtime's spec, and runsc compares both against the
+// checkpoint-time spec on restore, so a snapshot predating them fails to
+// restore.
+func TestShapeMicroVM_SetsGuestOnlyProcessAndSysctlFields(t *testing.T) {
+	const portStart = "net.ipv4.ip_unprivileged_port_start"
+
+	spec := Build(Options{ActorUID: testActorUID, ContainerName: "app", Args: []string{"/app"}})
+	if spec.Process.NoNewPrivileges {
+		t.Error("Build() set NoNewPrivileges; it must be micro-VM only")
+	}
+	if _, ok := spec.Linux.Sysctl[portStart]; ok {
+		t.Errorf("Build() set %s; it must be micro-VM only", portStart)
+	}
+
+	if err := ShapeMicroVM(spec, MicroVMOptions{ActorUID: testActorUID, ContainerID: "app"}); err != nil {
+		t.Fatalf("ShapeMicroVM() = %v", err)
+	}
+	if !spec.Process.NoNewPrivileges {
+		t.Error("NoNewPrivileges = false, want true so setuid bits are not honored in the guest")
+	}
+	if v := spec.Linux.Sysctl[portStart]; v != "0" {
+		t.Errorf("%s = %q, want \"0\" so a capability-free container can bind a low port", portStart, v)
+	}
+}
