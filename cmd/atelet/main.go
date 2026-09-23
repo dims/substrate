@@ -1459,8 +1459,9 @@ func (s *AteomHerder) prepareOCIBundles(
 			nodepath.ActorNetNSPath(actorUID),
 			nil, // pause is sandbox infra; it mounts no volumes.
 			nil,
-			nil, // pause only reaps; it needs no capabilities.
-			nil, // pause carries no user-declared limits.
+			nil,  // pause only reaps; it needs no capabilities.
+			nil,  // pause carries no user-declared limits.
+			true, // pause always runs as root; see prepareOCIDirectory.
 		); err != nil {
 			return wrapFileSystemErr("while creating pause OCI bundle", err)
 		}
@@ -1489,6 +1490,7 @@ func (s *AteomHerder) prepareOCIBundles(
 				ctr.GetVolumeMounts(),
 				resolveCapabilities(ctr.GetSecurityContext().GetCapabilities()),
 				ctr.GetResources(),
+				false, // application containers run as their own image declares.
 			); err != nil {
 				return wrapFileSystemErr(fmt.Sprintf("while creating %q OCI bundle", ctr.GetName()), err)
 			}

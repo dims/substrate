@@ -20,6 +20,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/agent-substrate/substrate/cmd/atelet/internal/ateletpath"
@@ -75,7 +76,7 @@ func resolveCapabilities(caps *ateletpb.Capabilities) []string {
 	return out
 }
 
-func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, actorUID, containerName, ref string, command, args []string, env []string, netns string, volumes []*ateletpb.Volume, volumeMounts []*ateletpb.VolumeMount, capabilities []string, resources *ateletpb.ResourceLimits) error {
+func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, actorUID, containerName, ref string, command, args []string, env []string, netns string, volumes []*ateletpb.Volume, volumeMounts []*ateletpb.VolumeMount, capabilities []string, resources *ateletpb.ResourceLimits, runAsRoot bool) error {
 	tracer := otel.Tracer("prepareOCIDirectory")
 
 	ctx, span := tracer.Start(ctx, "prepareOCIDirectory")
@@ -123,13 +124,25 @@ func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, acto
 		return err
 	}
 
-	// Argv and env need only the image config; resolve them before writing
-	// any spec so an invalid container config fails fast.
+	// Argv, env and user need only the image config; resolve them before
+	// writing any spec so an invalid container config fails fast.
 	resolvedArgs, err := resolveProcessArgs(&img.Config, command, args)
 	if err != nil {
 		return fmt.Errorf("while resolving process args for container %q: %w", containerName, err)
 	}
 	resolvedEnv := resolveActorEnv(&img.Config, env)
+	var uid, gid uint32
+	if runAsRoot {
+		// The pause container is our own infra, not tenant code, and gVisor's
+		// sandbox init cannot boot non-root. pause:3.10.2 declares
+		// USER 65535:65535, which works everywhere except here.
+		uid, gid = 0, 0
+	} else {
+		uid, gid, err = resolveUser(&img.Config)
+		if err != nil {
+			return fmt.Errorf("while resolving user for container %q: %w", containerName, err)
+		}
+	}
 
 	// Every bind target must exist in the rootfs for the mount to attach;
 	// ateom creates them through the mounted overlay (they land in the
@@ -160,6 +173,8 @@ func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, acto
 		VolumesDir:                ateletpath.VolumesDir(actorUID),
 		SystemInfoVolumeRootsDir:  ateletpath.SystemInfoVolumeRootsDir(actorUID),
 		BundlePath:                bundlePath,
+		UID:                       uid,
+		GID:                       gid,
 	})); err != nil {
 		return fmt.Errorf("while writing OCI spec: %w", err)
 	}
@@ -264,4 +279,31 @@ func resolveProcessArgs(imageCfg *v1.Config, command, args []string) ([]string, 
 		return nil, fmt.Errorf("no command specified: image defines neither ENTRYPOINT nor CMD and the container sets neither command nor args")
 	}
 	return argv, nil
+}
+
+// resolveUser reads the identity a container starts as from the image's own
+// Config.User ("uid[:gid]", what Docker's USER sets). Absent means root, as
+// with every other runtime. Numeric only: resolving a name needs the image's
+// passwd file, which nothing here has parsed, so fail loudly rather than
+// silently fall back to root.
+func resolveUser(imageCfg *v1.Config) (uid, gid uint32, err error) {
+	if imageCfg == nil || imageCfg.User == "" {
+		return 0, 0, nil
+	}
+	uidStr, gidStr, hasGroup := strings.Cut(imageCfg.User, ":")
+	parsedUID, err := strconv.ParseUint(uidStr, 10, 32)
+	if err != nil {
+		return 0, 0, fmt.Errorf("image User %q is not a numeric uid[:gid]: named users are not resolved from the image's passwd file", imageCfg.User)
+	}
+	if !hasGroup {
+		// No explicit group: run with GID equal to UID, matching the common
+		// minimal-image convention (e.g. distroless's own uid=gid=65532
+		// "nonroot" user) rather than defaulting to GID 0 (root's group).
+		return uint32(parsedUID), uint32(parsedUID), nil
+	}
+	parsedGID, err := strconv.ParseUint(gidStr, 10, 32)
+	if err != nil {
+		return 0, 0, fmt.Errorf("image User %q is not a numeric uid[:gid]: named groups are not resolved from the image's group file", imageCfg.User)
+	}
+	return uint32(parsedUID), uint32(parsedGID), nil
 }
