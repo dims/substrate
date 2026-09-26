@@ -70,6 +70,13 @@ func ShapeMicroVM(spec *specs.Spec, o MicroVMOptions) error {
 	}
 	spec.Mounts = append(guestSystemMounts(), volumes...)
 
+	if spec.Process != nil {
+		// runsc denies setuid elevation by default (--allow-suid=false); the
+		// kata agent needs the flag to do the same. Not in Build: runsc restore
+		// compares Process with the checkpoint-time spec.
+		spec.Process.NoNewPrivileges = true
+	}
+
 	if spec.Linux == nil {
 		spec.Linux = &specs.Linux{}
 	}
