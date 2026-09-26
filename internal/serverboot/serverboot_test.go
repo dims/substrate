@@ -49,6 +49,8 @@ func TestNewResourceDefaults(t *testing.T) {
 		t.Fatalf("newResource: %v", err)
 	}
 	attrs := resourceAttrs(res)
+	// The service name is the one attribute the caller picks; the instance id
+	// is generated, so only its presence is checked.
 	if got := attrs[string(semconv.ServiceNameKey)]; got != "ateapi" {
 		t.Errorf("service.name = %q, want ateapi", got)
 	}
