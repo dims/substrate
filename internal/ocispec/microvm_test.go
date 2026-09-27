@@ -152,3 +152,28 @@ func TestShapeMicroVM_LeavesUndeclaredContainerUnlimited(t *testing.T) {
 		t.Errorf("cpu quota = %d, want unset for a container that declared none", *c.Quota)
 	}
 }
+
+// Guest-only: set in Build it would break restores of older gVisor snapshots.
+func TestShapeMicroVM_AllowsLowPortsInTheGuest(t *testing.T) {
+	const portStart = "net.ipv4.ip_unprivileged_port_start"
+
+	spec := Build(Options{Args: []string{"/app"}})
+	if _, ok := spec.Linux.Sysctl[portStart]; ok {
+		t.Errorf("Build() set %s; it must be micro-VM only", portStart)
+	}
+	if err := ShapeMicroVM(spec, MicroVMOptions{ActorUID: testActorUID, ContainerID: "app"}); err != nil {
+		t.Fatalf("ShapeMicroVM() = %v", err)
+	}
+	if v := spec.Linux.Sysctl[portStart]; v != "0" {
+		t.Errorf("%s = %q, want \"0\"", portStart, v)
+	}
+
+	preset := Build(Options{Args: []string{"/app"}})
+	preset.Linux.Sysctl = map[string]string{portStart: "1024"}
+	if err := ShapeMicroVM(preset, MicroVMOptions{ActorUID: testActorUID, ContainerID: "app"}); err != nil {
+		t.Fatalf("ShapeMicroVM() = %v", err)
+	}
+	if v := preset.Linux.Sysctl[portStart]; v != "1024" {
+		t.Errorf("%s = %q, want the caller's value kept", portStart, v)
+	}
+}
