@@ -100,9 +100,10 @@ const (
 	// a whole repository would otherwise be sent back through the router.
 	maxOutputBytes = 8 << 20
 
-	// killDelay is how long a command gets after its context ends before the
-	// whole process group is killed.
-	killDelay = 5 * time.Second
+	// waitDelay bounds how long Wait keeps collecting output after the context
+	// ends. The process group is killed at once (cmd.Cancel); a descendant that
+	// left the group and still holds the output pipes is abandoned after this.
+	waitDelay = 5 * time.Second
 )
 
 func main() {
@@ -229,7 +230,7 @@ func run(ctx context.Context, name string, args []string, cwd string, env map[st
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
-	cmd.WaitDelay = killDelay
+	cmd.WaitDelay = waitDelay
 
 	stdout := &cappedBuffer{limit: maxOutputBytes}
 	stderr := &cappedBuffer{limit: maxOutputBytes}
