@@ -74,8 +74,10 @@ type ExecRequest struct {
 // ExecResponse is the /exec reply. A nonzero ExitCode with an empty ErrorType
 // is the command's own exit status. ErrorType "timeout" or "sandbox" means
 // the command did not run to completion, and ExitCode is then
-// runtimeExitCode. Evicting is set once the worker has announced that it is
-// going away, so the client can have the actor suspended in time.
+// runtimeExitCode. Evicting is set on the first reply after the worker has
+// announced that it is going away, so the client can have the actor
+// suspended in time. It is reported once: the flag would otherwise survive in
+// the memory snapshot and follow the actor to its next worker.
 type ExecResponse struct {
 	Stdout    string `json:"stdout"`
 	Stderr    string `json:"stderr"`
@@ -119,8 +121,8 @@ func main() {
 // sends SIGTERM to the actor's main process when its pod is going away, and
 // the actor then has a grace period in which it can still be suspended; a
 // process that exits cannot be. Only the client can ask for the suspend, so
-// the server records the signal, reports it on every /exec reply, and keeps
-// serving.
+// the server records the signal, reports it on the next /exec reply, and
+// keeps serving.
 func logEvictions(signals <-chan os.Signal) {
 	for sig := range signals {
 		evicting.Store(true)
@@ -210,7 +212,7 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := run(ctx, shellPath(), []string{"-c", req.Command}, req.Cwd, req.Env)
-	resp.Evicting = evicting.Load()
+	resp.Evicting = evicting.Swap(false)
 	writeJSON(w, resp)
 }
 
