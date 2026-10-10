@@ -68,6 +68,21 @@ kubectl port-forward -n ate-system svc/api 8080:443
 kubectl port-forward -n ate-system svc/atenet-router 8000:80
 ```
 
+## Using the Sandbox as a NeMo Gym Provider
+
+`main.go` also serves the HTTP contract the NeMo Gym `substrate` sandbox
+provider speaks (`GET /readyz`, `POST /exec`, `POST /upload`, `GET /download`).
+`gym-templates.sh` builds the image with `ko` and creates one `ActorTemplate`
+per benchmark image, mounting this server from an image volume so the
+benchmark image runs untouched:
+
+```bash
+BUCKET_NAME=<snapshot bucket> demos/sandbox/gym-templates.sh python:3.12-slim
+```
+
+The templates select the `sandbox` WorkerPool deployed above. See the
+provider's README in NeMo Gym for the client side.
+
 ## How to Use the Client
 
 Build and run the client REPL:
