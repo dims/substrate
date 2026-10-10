@@ -40,6 +40,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -73,13 +74,19 @@ type ExecRequest struct {
 // ExecResponse is the /exec reply. A nonzero ExitCode with an empty ErrorType
 // is the command's own exit status. ErrorType "timeout" or "sandbox" means
 // the command did not run to completion, and ExitCode is then
-// runtimeExitCode.
+// runtimeExitCode. Evicting is set once the worker has announced that it is
+// going away, so the client can have the actor suspended in time.
 type ExecResponse struct {
 	Stdout    string `json:"stdout"`
 	Stderr    string `json:"stderr"`
 	ExitCode  int    `json:"exit_code"`
 	ErrorType string `json:"error_type,omitempty"`
+	Evicting  bool   `json:"evicting,omitempty"`
 }
+
+// evicting records that the worker sent SIGTERM: its pod is going away and
+// the actor must be suspended within the grace period.
+var evicting atomic.Bool
 
 const (
 	// runtimeExitCode is reported when no process exit status exists: the
@@ -111,10 +118,12 @@ func main() {
 // logEvictions keeps the server alive through an eviction notice. The worker
 // sends SIGTERM to the actor's main process when its pod is going away, and
 // the actor then has a grace period in which it can still be suspended; a
-// process that exits cannot be. The harness decides when to suspend, so the
-// server only notes the signal and keeps serving.
+// process that exits cannot be. Only the client can ask for the suspend, so
+// the server records the signal, reports it on every /exec reply, and keeps
+// serving.
 func logEvictions(signals <-chan os.Signal) {
 	for sig := range signals {
+		evicting.Store(true)
 		log.Printf("received %v: worker is being evicted; continuing to serve so the actor can be suspended", sig)
 	}
 }
@@ -200,7 +209,9 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 	}
 
-	writeJSON(w, run(ctx, shellPath(), []string{"-c", req.Command}, req.Cwd, req.Env))
+	resp := run(ctx, shellPath(), []string{"-c", req.Command}, req.Cwd, req.Env)
+	resp.Evicting = evicting.Load()
+	writeJSON(w, resp)
 }
 
 // run executes argv and reports what happened in the /exec shape. The process

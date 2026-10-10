@@ -215,6 +215,8 @@ func TestEvictionSignalDoesNotStopServing(t *testing.T) {
 	close(signals)
 	<-done
 
+	t.Cleanup(func() { evicting.Store(false) })
+
 	srv := httptest.NewServer(newMux())
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/readyz")
@@ -224,5 +226,10 @@ func TestEvictionSignalDoesNotStopServing(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status %d after eviction signal", resp.StatusCode)
+	}
+	// Every reply now carries the notice so the client can suspend the actor.
+	out := decodeExec(t, postJSON(t, srv.URL+"/exec", ExecRequest{Command: "true"}))
+	if !out.Evicting {
+		t.Fatal("exec reply does not report the eviction")
 	}
 }
