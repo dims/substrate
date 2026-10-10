@@ -227,9 +227,13 @@ func TestEvictionSignalDoesNotStopServing(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status %d after eviction signal", resp.StatusCode)
 	}
-	// Every reply now carries the notice so the client can suspend the actor.
+	// The next reply carries the notice so the client can suspend the actor;
+	// later replies do not, so a restored actor is not told again.
 	out := decodeExec(t, postJSON(t, srv.URL+"/exec", ExecRequest{Command: "true"}))
 	if !out.Evicting {
 		t.Fatal("exec reply does not report the eviction")
+	}
+	if again := decodeExec(t, postJSON(t, srv.URL+"/exec", ExecRequest{Command: "true"})); again.Evicting {
+		t.Fatal("eviction reported twice")
 	}
 }
