@@ -19,21 +19,26 @@
 #
 #   BUCKET_NAME=<snapshot bucket> demos/sandbox/gym-templates.sh IMAGE...
 #
-#   ATESPACE      templates go here (default nemo-gym); created if missing
-#   WORKLOAD      WorkerPool label the templates select (default sandbox)
-#   ACTOR_MEMORY  memory limit per actor (default 1Gi); keep it within the pool
-#   AGENT_IMAGE   digest-pinned sandbox server image (default: ko build)
+#   ATESPACE        templates go here (default nemo-gym); created if missing
+#   WORKLOAD        WorkerPool label the templates select (default sandbox)
+#   ACTOR_CPU       cpu limit per actor (default 1); with ACTOR_MEMORY this
+#   ACTOR_MEMORY    memory limit per actor (default 1Gi); sets how many
+#                   actors share one worker, so size both against the pool
+#   AGENT_IMAGE     digest-pinned sandbox server image (default: ko build,
+#                   which needs KO_DOCKER_REPO)
 #
-# Pass each image exactly as NeMo Gym will ask for it: the template name is
-# derived from that string on both sides.
+# Pass each image as NeMo Gym will ask for it. The template name is derived
+# from the image string after dropping a docker:// or oci:// scheme and a
+# docker.io/ registry, the same way the provider's unit-tested
+# template_name_for_image does.
 set -o errexit -o nounset -o pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 : "${BUCKET_NAME:?set BUCKET_NAME to the snapshot bucket}"
 ATESPACE="${ATESPACE:-nemo-gym}"
 WORKLOAD="${WORKLOAD:-sandbox}"
+ACTOR_CPU="${ACTOR_CPU:-1}"
 ACTOR_MEMORY="${ACTOR_MEMORY:-1Gi}"
-AGENT_IMAGE="${AGENT_IMAGE:-$(ko build --base-import-paths ./demos/sandbox)}"
 
 crane() {
   go run "github.com/google/go-containerregistry/cmd/crane@$(go list -m -f '{{.Version}}' github.com/google/go-containerregistry)" "$@"
@@ -44,12 +49,18 @@ kubectl ate get atespaces "${ATESPACE}" >/dev/null 2>&1 || kubectl ate create at
 for image in "$@"; do
   ref="${image#docker://}"
   ref="${ref#oci://}"
+  ref="${ref#docker.io/}"
   name="swb-$(printf %s "${ref}" | shasum -a 256 | cut -c1-16)"
-  if kubectl ate get actor-template "${name}" -a "${ATESPACE}" >/dev/null 2>&1; then
-    echo "${ATESPACE}/${name} already serves ${ref}"
+  pinned="${ref%%@*}@$(crane digest "${ref}")"
+  if existing="$(kubectl ate get actor-template "${name}" -a "${ATESPACE}" -o yaml 2>/dev/null)"; then
+    if grep -q "image: ${pinned}\$" <<<"${existing}"; then
+      echo "${ATESPACE}/${name} already serves ${pinned}"
+    else
+      echo "warning: ${ATESPACE}/${name} serves an older digest of ${ref}; delete it to pick up ${pinned}" >&2
+    fi
     continue
   fi
-  pinned="${ref%%@*}@$(crane digest "${ref}")"
+  AGENT_IMAGE="${AGENT_IMAGE:-$(ko build --base-import-paths ./demos/sandbox)}"
   kubectl ate create actor-template -f - <<MANIFEST
 metadata:
   atespace: ${ATESPACE}
@@ -79,7 +90,7 @@ volumes:
 resources:
   limits:
   - name: cpu
-    quantity: "2"
+    quantity: "${ACTOR_CPU}"
   - name: memory
     quantity: ${ACTOR_MEMORY}
 snapshotConfig:

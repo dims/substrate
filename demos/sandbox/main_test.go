@@ -20,9 +20,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func postJSON(t *testing.T, url string, body any) *http.Response {
@@ -97,6 +100,26 @@ func TestExecTimeoutKillsAndReportsSentinel(t *testing.T) {
 	out := decodeExec(t, postJSON(t, srv.URL+"/exec", ExecRequest{Command: "sleep 30", TimeoutS: 0.2}))
 	if out.ExitCode != runtimeExitCode || out.ErrorType != "timeout" {
 		t.Fatalf("exit=%d error_type=%q stderr=%q", out.ExitCode, out.ErrorType, out.Stderr)
+	}
+}
+
+func TestExecTimeoutKillsBackgroundChildren(t *testing.T) {
+	srv := httptest.NewServer(newMux())
+	defer srv.Close()
+	marker := filepath.Join(t.TempDir(), "survivor")
+
+	// The shell forks a child and then waits; killing only the shell would
+	// leave the child to write the marker after the timeout.
+	out := decodeExec(t, postJSON(t, srv.URL+"/exec", ExecRequest{
+		Command:  "(sleep 1; touch " + marker + ") & sleep 30",
+		TimeoutS: 0.2,
+	}))
+	if out.ErrorType != "timeout" {
+		t.Fatalf("error_type %q", out.ErrorType)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("background child survived the timeout")
 	}
 }
 
@@ -178,5 +201,28 @@ func TestCappedBufferTruncates(t *testing.T) {
 	_, _ = b.Write([]byte("abcdef"))
 	if got := b.String(); got != "abcd\n[output truncated]" {
 		t.Fatalf("%q", got)
+	}
+}
+
+func TestEvictionSignalDoesNotStopServing(t *testing.T) {
+	signals := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	go func() {
+		logEvictions(signals)
+		close(done)
+	}()
+	signals <- syscall.SIGTERM
+	close(signals)
+	<-done
+
+	srv := httptest.NewServer(newMux())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d after eviction signal", resp.StatusCode)
 	}
 }

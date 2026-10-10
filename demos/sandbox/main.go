@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -100,8 +101,22 @@ func main() {
 	if port == "" {
 		port = "80"
 	}
+	evictions := make(chan os.Signal, 1)
+	signal.Notify(evictions, syscall.SIGTERM)
+	go logEvictions(evictions)
 	log.Printf("sandbox agent serving on port %s (shell %q)", port, shellPath())
 	log.Fatal(http.ListenAndServe(":"+port, newMux()))
+}
+
+// logEvictions keeps the server alive through an eviction notice. The worker
+// sends SIGTERM to the actor's main process when its pod is going away, and
+// the actor then has a grace period in which it can still be suspended; a
+// process that exits cannot be. The harness decides when to suspend, so the
+// server only notes the signal and keeps serving.
+func logEvictions(signals <-chan os.Signal) {
+	for sig := range signals {
+		log.Printf("received %v: worker is being evicted; continuing to serve so the actor can be suspended", sig)
+	}
 }
 
 func newMux() *http.ServeMux {
@@ -156,15 +171,7 @@ func handleProcess(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := run(ctx, req.Command[0], req.Command[1:], req.Cwd, req.EnvVars)
-	resp := ProcessResponse{Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: result.ExitCode}
-	if result.ErrorType != "" {
-		resp.Error = result.ErrorType
-		if result.ExitCode == runtimeExitCode {
-			// The REPL client predates the sentinel and expects -1 here.
-			resp.ExitCode = -1
-		}
-	}
-	writeJSON(w, resp)
+	writeJSON(w, ProcessResponse{Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: result.ExitCode, Error: result.ErrorType})
 }
 
 func handleExec(w http.ResponseWriter, r *http.Request) {
