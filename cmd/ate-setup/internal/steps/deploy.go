@@ -311,7 +311,7 @@ func (e *Env) DeployAteAPIServer(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := e.renderResolveApply(ctx, e.Cfg.Manifest("ate-api-server.yaml")); err != nil {
+	if err := e.renderComponentResolveApply(ctx, "ate-api-server.yaml"); err != nil {
 		return err
 	}
 	// After the manifest, which resets the pod template to the sidecar-free base.
@@ -334,7 +334,7 @@ func (e *Env) DeployAteController(ctx context.Context) error {
 	if err := e.applyOtelConfig(ctx); err != nil {
 		return err
 	}
-	if err := e.renderResolveApply(ctx, e.Cfg.Manifest("ate-controller.yaml")); err != nil {
+	if err := e.renderComponentResolveApply(ctx, "ate-controller.yaml"); err != nil {
 		return err
 	}
 	return e.Kube.RolloutStatus(ctx, kube.KindDeployment, e.Namespace(), "ate-controller", e.Cfg.RolloutTimeout)

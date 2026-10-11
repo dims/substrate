@@ -22,7 +22,10 @@ import (
 	"strings"
 	"time"
 
+	"sigs.k8s.io/yaml"
+
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kube"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kustomize"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
 )
@@ -112,6 +115,54 @@ func (e *Env) renderResolveApply(ctx context.Context, path string) error {
 		return err
 	}
 	return e.Kube.ApplyBytes(ctx, manifest)
+}
+
+// renderComponent renders the system overlay and keeps the objects that base,
+// a file under manifests/ate-install, defines. A component redeploy then gets
+// the overlay's patches for it, such as the kind rustfs settings, without
+// re-applying the rest of the bundle.
+func (e *Env) renderComponent(base string) ([]byte, error) {
+	baseObjs, err := kube.LoadPath(e.Cfg.Manifest(base))
+	if err != nil {
+		return nil, err
+	}
+	type key struct{ kind, namespace, name string }
+	want := make(map[key]bool, len(baseObjs))
+	for _, obj := range baseObjs {
+		want[key{obj.GetKind(), obj.GetNamespace(), obj.GetName()}] = true
+	}
+
+	full, err := e.render(e.Cfg.Path(SystemOverlay(e.Cfg)))
+	if err != nil {
+		return nil, err
+	}
+	objs, err := kube.DecodeManifestBytes(full)
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	for _, obj := range objs {
+		if !want[key{obj.GetKind(), obj.GetNamespace(), obj.GetName()}] {
+			continue
+		}
+		data, err := yaml.Marshal(obj.Object)
+		if err != nil {
+			return nil, fmt.Errorf("while encoding %s %s: %w", obj.GetKind(), obj.GetName(), err)
+		}
+		out.WriteString("---\n")
+		out.Write(data)
+	}
+	return out.Bytes(), nil
+}
+
+// renderComponentResolveApply is renderResolveApply for one component of the
+// system overlay.
+func (e *Env) renderComponentResolveApply(ctx context.Context, base string) error {
+	manifest, err := e.renderComponent(base)
+	if err != nil {
+		return err
+	}
+	return e.ResolveAndApplyBytes(ctx, manifest)
 }
 
 // renderSystemManifests produces the full control plane manifest with all
