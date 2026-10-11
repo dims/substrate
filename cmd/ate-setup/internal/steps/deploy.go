@@ -79,6 +79,10 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 	if err := e.CheckCSIDriver(opts.SetupCSI); err != nil {
 		return err
 	}
+	// And buildx, before the ko builds the Dockerfile image follows.
+	if err := e.RequireBuildTools(ctx); err != nil {
+		return err
+	}
 
 	// The namespace has to exist before RBAC or CRDs are applied.
 	if err := e.EnsureAteSystemNamespace(ctx); err != nil {
@@ -398,6 +402,9 @@ func (e *Env) DeployAtenet(ctx context.Context) error {
 
 	provider, err := e.Cfg.CredentialProvider()
 	if err != nil {
+		return err
+	}
+	if err := e.RequireBuildTools(ctx); err != nil {
 		return err
 	}
 	if err := e.EnsureCRDs(ctx); err != nil {

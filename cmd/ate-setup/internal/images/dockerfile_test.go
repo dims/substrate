@@ -16,9 +16,12 @@ package images
 
 import (
 	"cmp"
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -75,5 +78,34 @@ func TestDockerfilePlatforms(t *testing.T) {
 				t.Errorf("dockerfilePlatforms() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// fakeDocker puts a docker on PATH that prints out to stderr and exits with code.
+func fakeDocker(t *testing.T, out string, code int) {
+	t.Helper()
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\necho '%s' >&2\nexit %d\n", out, code)
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+func TestRequireBuildx(t *testing.T) {
+	fakeDocker(t, "github.com/docker/buildx v0.30.1", 0)
+	if err := RequireBuildx(context.Background()); err != nil {
+		t.Errorf("RequireBuildx() = %v with buildx present, want nil", err)
+	}
+
+	fakeDocker(t, "docker: unknown command: docker buildx", 1)
+	err := RequireBuildx(context.Background())
+	if err == nil {
+		t.Fatal("RequireBuildx() = nil without buildx, want an error")
+	}
+	for _, want := range []string{"docker-buildx", "--image-repo", "unknown command"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %s", err, want)
+		}
 	}
 }
