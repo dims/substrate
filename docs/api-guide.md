@@ -438,12 +438,12 @@ spec:
     assets:
       amd64:
         gvisor:
-          url: "gs://gvisor/releases/nightly/2026-09-02/x86_64/gvisor.tar.zstd"
-          sha256: "d547d81401461fd1c679c5c4fa0a6c2b8ef7dc3c22ce23c9e25dcc4c69cfd06f"
+          url: "gs://gvisor/releases/release/20261005.0/x86_64/gvisor.tar.zstd"
+          sha256: "0a8a9058b9f11791a2097f03190c2ddc5b963c3dbee5bb9fd8497f4801c42f92"
       arm64:
         gvisor:
-          url: "gs://gvisor/releases/nightly/2026-09-02/aarch64/gvisor.tar.zstd"
-          sha256: "a64916f9813ce7e4841a30480a599337f7dda07b421c6bf0123db2212aa7d1df"
+          url: "gs://gvisor/releases/release/20261005.0/aarch64/gvisor.tar.zstd"
+          sha256: "f8bd7cb4e989db445255c20e6c2962498e5b5bd1ec1407bfcf187fbd5f184a2a"
 ```
 
 ### Micro-VM SandboxConfig
