@@ -23,12 +23,14 @@ Provider names and issuers must be unique. `issuer` must be an HTTPS URL and
 matches. `certificateAuthorityFile` and `discoveryTokenFile` are optional and
 are needed for OIDC discovery against some private Kubernetes API servers.
 
-`actorIdentityJWTProvider` identifies the provider allowed to call
-`ActorIdentity.MintJWT`. Other authenticated providers can call every RPC.
-Authorization and RBAC are not implemented yet, so only configure providers
-whose users should have full control of the entire control plane: every
-atespace, actor, actor template, egress policy, snapshot and worker in the
-cluster.
+`actorIdentityJWTProvider` must name one of the providers. The server
+validates it and nothing else reads it today; every authenticated provider can
+call every RPC. Authorization is off unless `ate-api-server` runs with
+`--experimental-enable-authz` (and `--authz-bootstrap-owners`), which enforces
+the `AccessPolicy` resources described in [resource-model.md](resource-model.md)
+on every RPC. Without it, only configure providers whose users should have full
+control of the entire control plane: every atespace, actor, actor template,
+egress policy, snapshot and worker in the cluster.
 
 ## Google Cloud CLI tokens
 

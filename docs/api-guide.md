@@ -141,7 +141,7 @@ Unlike a Pod, an actor is sized by its **`limits`** (CPU and Memory): the size i
 2. **Gate scheduling.** An actor is only placed on a `WorkerPool` whose [worker capacity](#worker-capacity-spectemplateresources) is `>=` these limits.
 3. **Fall back to runtime defaults.** A zero or absent limit leaves that dimension at the runtime default: unlimited for gVisor, and 2 GiB / 1 vCPU for the micro-VM.
 
-`requests` are not consulted today (an actor occupies its whole worker). Because the size is baked into snapshots, a **micro-VM MEMORY-fidelity restore reuses the size in the snapshot**; changing an actor's limits takes effect on its next cold boot.
+A worker hosts as many actors as fit. The scheduler places an actor on a worker whose free capacity, that is the capacity it reports minus the limits of the actors already assigned to it, covers the actor's limits in every dimension the worker reports, and whose actor count is below the worker's limit. `requests` are not consulted. Because the size is baked into snapshots, a **micro-VM MEMORY-fidelity restore reuses the size in the snapshot**; changing an actor's limits takes effect on its next cold boot.
 
 Container environment variables support literal `value` entries only. Values are not interpolated (`$(VAR)` references are not expanded), and Kubernetes `envFrom`/`valueFrom` sources are not supported.
 
@@ -398,7 +398,7 @@ One consequence worth planning for: **a published snapshot is read from the ates
 
 `SandboxConfig` is a **cluster-scoped** resource that decouples the sandbox — its binaries (the gVisor `runsc` binary, or a micro-VM kernel/firmware/config) and the `pauseImage` that holds the sandbox's namespaces — from the workload definition in the `ActorTemplate`. An actor's cold boot resolves the sandbox binaries from the default version of the config its `ActorTemplate` names via `sandboxConfig.configName`.
 
-This means a single, cluster-managed config pins the sandbox runtime version for many templates: snapshots stay restorable because the version is recorded in each snapshot's manifest, and operators upgrade the runtime in one place.
+This means a single, cluster-managed config pins the sandbox runtime version for many templates, and operators upgrade the runtime in one place. Each snapshot's manifest records the version it was taken with, and a restore runs under the version the template's `SandboxConfig` names at restore time; see [Arm and 64 KiB pages](#arm-and-64-kib-pages) for what that means for a runtime change.
 
 ### Specification (`SandboxConfigSpec`)
 
@@ -446,6 +446,12 @@ spec:
           sha256: "a64916f9813ce7e4841a30480a599337f7dda07b421c6bf0123db2212aa7d1df"
 ```
 
+### Arm and 64 KiB pages
+
+`assets` is keyed by architecture, so one `SandboxConfig` serves amd64 and arm64 pools; atelet fetches the entry for its own architecture. Page size is separate: gVisor compiles it into `runsc`, and the released aarch64 build is 4 KiB. A 64 KiB-page node needs a `runsc` built with `--define=pagesize=64k`, published where atelet can fetch it, in a `SandboxConfig` of its own that the templates for that pool name through `sandboxConfig.configName`. Substrate sets no gVisor platform (`runsc` runs on systrap) and requests `/dev/kvm` only for micro-VM pools.
+
+A checkpoint restores only under a compatible `runsc` build, page size included, and a restore uses the assets the template's `SandboxConfig` names at restore time, not the ones in the snapshot's manifest. Change an asset while no actor of that config holds a snapshot you need, or recreate the templates afterwards.
+
 ### Micro-VM SandboxConfig
 
 A `microvm` `SandboxConfig` supplies the [Kata Containers](https://katacontainers.io/) + [Cloud Hypervisor](https://www.cloudhypervisor.org/) toolchain instead of `runsc`. Each architecture of each version must define the full asset set — `cloud-hypervisor`, `virtiofsd`, `kata-kernel`, and `kata-image` — which a `ValidatingAdmissionPolicy` enforces at apply time. Worker pods for a micro-VM pool require `/dev/kvm` and nested-virtualization-capable nodes. The controller requests those devices on the pod automatically, and atelet advertises them only where they exist, so placement follows the hardware rather than a node label. Clusters that reserve nested-virt nodes with an `ate.dev/sandboxClass=microvm` taint are still tolerated: advertising a device attracts these pods to capable nodes but repels nothing else from them. The same convention applies to every class: worker pods of a pool tolerate `ate.dev/sandboxClass=<its class>:NoSchedule`, so a cluster can reserve a node pool per sandbox class with that taint, and the atelet DaemonSet tolerates the key for any value.
@@ -484,6 +490,8 @@ Every actor that must keep its state through an eviction needs a `SIGTERM` handl
 An actor still running when the 30 minutes are up is killed. Once the pod is gone, the actor moves to `ACTOR_STATE_CRASHED`, and everything since its last snapshot is lost. `RevertActor` (`kubectl ate revert`) returns a crashed actor to `ACTOR_STATE_SUSPENDED` at its last external snapshot.
 
 The node can cut the 30 minutes short. GKE node upgrades and cluster autoscaler scale-downs wait up to an hour for a pod, so they leave the full 30 minutes. A reclaimed GKE [Spot VM](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/spot-vms) gives pods 15 seconds by default and at most 2 minutes, so an actor there has to be suspended in that time or it crashes.
+
+A paused actor is not evicted. It holds no worker, so the pod's `SIGTERM` never reaches it and the worker's removal leaves it `ACTOR_STATE_PAUSED`. Its node-local snapshot lives on the node: the actor resumes there after the pod is replaced, and a node that goes away takes the snapshot, and everything since the last external snapshot, with it. `SuspendActor` works on a paused actor, also while the worker drains; call it before the node goes. The [upgrade guide](upgrade.md) lists the paused actors whose snapshot lives on a node.
 
 ---
 
@@ -577,34 +585,18 @@ Query the physical resource pool.
 
 ## 7. Advanced: Actor Identity Credentials
 
-Workloads can exchange their ephemeral Kubernetes credentials for stable **Actor Identity** credentials that persist even as the process migrates between different physical workers. This is distinct from the `actorMetadata` data source described under [SystemInfo Volumes](#systeminfo-volumes), which only tells an actor its own identity fields (name, atespace, uid).
+Substrate mints credentials that assert an actor's identity and stay valid as the actor moves between workers. This is distinct from the `actorMetadata` data source described under [SystemInfo Volumes](#systeminfo-volumes), which only tells an actor its own identity fields (name, atespace, uid). Two services mint them.
 
-### Service: `ateapi.ActorIdentity`
-*   **`MintJWT`:** Generates an OIDC-compatible JWT identifying the Substrate Actor.
-*   **`MintCert`:** Signs a Certificate Signing Request (CSR) to provide an mTLS identity for the actor.
+### `ateapi.Control`: `MintActorJWT` and `MintActorCertificate`
 
-Both RPCs identify the actor the same way the rest of the API does, by `atespace` and `actor_name`.
+* **`MintActorJWT`** returns an OIDC-compatible JWT with subject `actor/<atespace>/<name>`, the requested audiences (at least one), and the actor's atespace, name and UID as claims. The egress gateway calls it when an egress policy injects an actor JWT into outbound requests; see [Egress credential injection](egress-credential-injection.md).
+* **`MintActorCertificate`** signs a Certificate Signing Request into a one-hour leaf certificate with the SPIFFE URI `spiffe://substrate-actor.local/atespace/<atespace>/actor/<name>` and the actor identity extension. The caller must authenticate with a client certificate, so a bearer token cannot bootstrap a proof-of-possession credential.
 
-#### Who may call `MintCert` and `MintJWT`
+Both identify the actor by `atespace` and `actor_name`, as the rest of the API does, and both require that the actor exists; it does not have to be running, because credentials are issued during boot and resume. `MintActorCertificate` also requires the actor's current UID. Neither RPC checks who the caller is beyond authentication: authorization of these RPCs is not implemented.
 
-`MintCert` and `MintJWT` are not callable by actors directly. They must be called over mTLS with a
-Pod Certificate, and the broker only signs a CSR when all of the following hold:
+### `ateapi.WorkerService`: `MintAteomActorCertificate`
 
-1.  The client certificate identifies the **`atelet`** service account
-    (`spiffe://cluster.local/ns/ate-system/sa/atelet`) and carries a Pod Identity
-    extension, which pins the calling atelet to a node.
-2.  The requested actor is **currently running**, per the actor database.
-3.  The worker Pod hosting that actor is on the **same node** as the calling
-    atelet, and is still assigned to that actor.
-
-An atelet is therefore confined to minting credentials for the actors it is
-actually hosting. Callers that fail any of these checks receive
-`PERMISSION_DENIED` with no detail, so the RPC cannot be used to discover
-whether an actor exists or where it is running. An actor that exists but is
-suspended, paused, or crashed yields `FAILED_PRECONDITION`.
-
-The minted leaf certificate carries the SPIFFE URI
-`spiffe://substrate-actor.local/atespace/${atespace}/actor/${actor_name}`.
+The tunnel inside each sandbox (`atunnel`) gets its certificate through the node-local atelet, which calls this RPC. Only atelet may call it: the client certificate must carry the atelet service account's SPIFFE ID (`spiffe://cluster.local/ns/ate-system/sa/atelet`) and a Pod Identity extension, and every other caller gets `PERMISSION_DENIED` with no detail. The actor must exist with the UID the request names. The leaf carries the SPIFFE URI `spiffe://substrate-actor.local/ateom-for-actor/<atespace>/<name>` and no actor identity extension, so it cannot pass for the actor's own certificate.
 
 ---
 

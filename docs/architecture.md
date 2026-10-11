@@ -233,11 +233,14 @@ store (PostgreSQL) to support real-time operations.
 
   * **Actor**: A specific instance of an ActorTemplate. An Actor record tracks
     its globally unique identifier, physical location (Worker IP), current
-    state (RUNNING or SUSPENDED), and version-specific state metadata.
+    state (`SUSPENDED`, `RESUMING`, `RUNNING`, `SUSPENDING`, `PAUSING`,
+    `PAUSED`, `CRASHED`, `REVERTING` or `DELETING`), and version-specific
+    state metadata.
 
   * **Worker**: A representation of a worker pod in the WorkerPool. It tracks
-    the worker's unique identifier, current status (IDLE or BUSY), and the
-    Actor it is currently hosting (if any).
+    the worker's unique identifier, its state (`ACTIVE` or `DRAINING`), its
+    capacity and the share of it allocated to the actors assigned to it, and
+    those assignments. A worker hosts as many actors as fit its capacity.
 
 ### Architectural Rationale
 
@@ -257,7 +260,7 @@ and Performance:
       familiar RBAC, auditing, and policy enforcement to the underlying
       infrastructure, while workload definitions (ActorTemplates) are managed
       through the substrate API instead, which authenticates callers itself
-      but does not yet implement authorization (see
+      and authorizes them only when `--experimental-enable-authz` is set (see
       [authentication.md](authentication.md)).
 
 ### Resource Model
@@ -289,8 +292,9 @@ classDiagram
         }
         class Worker {
             <<record>>
-            actorName
-            podIP
+            status
+            assignments
+            ips
         }
     }
 
@@ -298,7 +302,7 @@ classDiagram
     WorkerPool ..> Deployment : reconciled by atecontroller
     Deployment "1" *-- "*" WorkerPod : manages
     Actor "*" --> "1" ActorTemplate : actor_template
-    Actor "0..1" --> "0..1" Worker : runs on
+    Actor "*" --> "0..1" Worker : runs on
     Worker "1" --> "1" WorkerPod : maps to
 ```
 
@@ -424,8 +428,23 @@ stateDiagram-v2
     PAUSING --> PAUSED : node-local checkpoint complete
     PAUSED --> RESUMING : ResumeActor (pinned to the snapshot's node)
     PAUSED --> SUSPENDING : SuspendActor (uploads the node-local snapshot)
-    SUSPENDED --> [*] : DeleteActor
+    RESUMING --> CRASHED : restore or boot failed on the worker
+    RUNNING --> CRASHED : worker pod gone, or sandbox runtime restarted
+    SUSPENDING --> CRASHED : checkpoint failed on the worker
+    PAUSING --> CRASHED : checkpoint failed on the worker
+    RUNNING --> REVERTING : RevertActor
+    PAUSED --> REVERTING : RevertActor
+    CRASHED --> REVERTING : RevertActor
+    REVERTING --> SUSPENDED : sandbox terminated, last external snapshot kept
+    SUSPENDED --> DELETING : DeleteActor
+    CRASHED --> DELETING : DeleteActor
+    DELETING --> [*] : volumes and record removed
 ```
+
+A step that fails on the worker crashes the actor, except a terminate during
+revert or delete, a transport error, or the caller's own deadline; those are
+retried. `DeleteActor` with `any_state` also takes a `RUNNING` or `PAUSED`
+actor to `DELETING`.
 
 ### Phase 1: Creation (`CreateActor`)
 
