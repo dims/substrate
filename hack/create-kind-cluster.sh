@@ -84,6 +84,14 @@ else
   echo "/dev/kvm not available: micro-VM support disabled (gVisor still works)."
 fi
 
+# kubelet, containerd and every sandbox share the host's inotify instance
+# budget; a node at the default of 128 ran out near 64 sandboxes.
+inotify_instances="$(docker run --rm busybox cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || echo unknown)"
+if [[ "${inotify_instances}" =~ ^[0-9]+$ ]] && (( inotify_instances < 8192 )); then
+  echo "warning: fs.inotify.max_user_instances is ${inotify_instances} on the Docker host; sandboxes fail to start when it runs out." >&2
+  echo "         Raise it: sudo sysctl -w fs.inotify.max_user_instances=8192 (persist in /etc/sysctl.d/)" >&2
+fi
+
 echo "Creating kind configuration for cluster '${KIND_CLUSTER_NAME}' (ipFamily=${IP_FAMILY})..."
 cat <<EOF > "${ROOT}/bin/kind-config.yaml"
 kind: Cluster

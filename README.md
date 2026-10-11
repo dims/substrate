@@ -104,7 +104,7 @@ goals in the near term.
 
 To quickly set up the complete environment:
 
-1. Make sure you have [Go](https://go.dev/doc/install), [`kubectl`](https://kubernetes.io/docs/tasks/tools/), and [`docker`](https://www.docker.com/) installed and configured on your dev machine. We will automatically manage other dependencies via Go, including [`kind`](https://kind.sigs.k8s.io/).
+1. Make sure you have [Go](https://go.dev/doc/install), [`kubectl`](https://kubernetes.io/docs/tasks/tools/), and [`docker`](https://www.docker.com/) installed and configured on your dev machine. We will automatically manage other dependencies via Go, including [`kind`](https://kind.sigs.k8s.io/). On Linux, set `fs.inotify.max_user_instances` to 8192 or more: kubelet, containerd and every sandbox share it, and the default of 128 runs out near 64 sandboxes.
 
 2. Run the following steps:
 ```shell
