@@ -76,6 +76,9 @@ func (e *Env) PublishReleaseImages(ctx context.Context, w io.Writer) error {
 		return err
 	}
 	log.Stepf("publish_release_images (%s)", tag)
+	if err := images.RequireBuildx(ctx); err != nil {
+		return err
+	}
 	runner, err := e.koRunner()
 	if err != nil {
 		return err

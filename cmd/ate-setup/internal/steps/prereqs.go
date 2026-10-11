@@ -18,8 +18,19 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/images"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
 )
+
+// RequireBuildTools fails fast when the envoy-dataplane image must be built
+// and docker buildx is missing.
+func (e *Env) RequireBuildTools(ctx context.Context) error {
+	if e.Cfg.Images.IsPrebuilt() || e.Cfg.Router != config.RouterEnvoy {
+		return nil
+	}
+	return images.RequireBuildx(ctx)
+}
 
 // trustBundleNames are the ClusterTrustBundles the podcertificate controller
 // publishes once it is running. Workloads project them, so nothing that
