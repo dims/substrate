@@ -56,5 +56,7 @@ export KO_DOCKER_REPO="gcr.io/${PROJECT_ID}/ate-images"
 # uses a provider you deploy yourself. See docs/egress-credential-injection.md.
 export ATE_CREDENTIAL_PROVIDER='{"name":"k8s.io"}'
 
-# Set this if you want to override the default build platforms
+# Platforms for ko and the envoy-dataplane build. Unset, both follow .ko.yaml
+# (linux/amd64 and linux/arm64). Name the cluster's node architecture, for
+# example linux/arm64. The kind install ignores this and builds for the host.
 export KO_DEFAULTPLATFORMS=linux/amd64
