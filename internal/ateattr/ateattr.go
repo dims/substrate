@@ -226,9 +226,20 @@ const (
 	// RouterResumeJoined indicates this request waited on another request's
 	// singleflight resume, which completed a cold activation.
 	RouterResumeJoined = "joined"
-	// RouterResumeUnknown indicates the resume did not complete, so the router
-	// cannot tell whether an activation ran. The resume failed, or the request
-	// stopped first, or the direction never resumes an actor.
+	// RouterResumeParkedExhausted indicates the request was parked and the
+	// parking budget elapsed while the resume was still blocked on a retryable
+	// condition, so the request failed without an activation of its own.
+	RouterResumeParkedExhausted = "parked_exhausted"
+	// RouterResumeParkedRejected indicates the request was shed because the
+	// parking lot was full when its flight began retrying.
+	RouterResumeParkedRejected = "parked_rejected"
+	// RouterResumeCanceled indicates the request ended, by a client disconnect
+	// or its own deadline, before the shared resume answered. The flight goes
+	// on and may still activate the actor.
+	RouterResumeCanceled = "canceled"
+	// RouterResumeUnknown indicates the resume failed for a reason other than
+	// the parking budget, so the router cannot tell whether an activation ran,
+	// or the direction never resumes an actor.
 	RouterResumeUnknown = "unknown"
 )
 
