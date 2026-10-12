@@ -163,7 +163,11 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 		WithReadinessProbe(corev1ac.Probe().
 			WithHTTPGet(corev1ac.HTTPGetAction().
 				WithPath("/readyz").
-				WithPort(intstr.FromString("readyz")))).
+				WithPort(intstr.FromString("readyz"))).
+			// A loaded node answers readyz late; the kubelet defaults (1 s, 3 fails)
+			// flag a healthy worker NotReady.
+			WithTimeoutSeconds(5).
+			WithFailureThreshold(6)).
 		WithSecurityContext(ateomSecurityContext(wp.Spec.DefaultSandboxClass())).
 		WithEnv(ateomContainerEnv(otel)...).
 		WithVolumeMounts(
