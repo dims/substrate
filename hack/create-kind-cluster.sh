@@ -21,6 +21,7 @@ KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-kind}"
 KUBECTL_CONTEXT="kind-${KIND_CLUSTER_NAME}"
 reg_name="kind-registry"
 reg_port="${KIND_REGISTRY_PORT:-5001}"
+KIND_WORKERS="${KIND_WORKERS:-0}"
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
@@ -92,22 +93,26 @@ if [[ "${inotify_instances}" =~ ^[0-9]+$ ]] && (( inotify_instances < 8192 )); t
   echo "         Raise it: sudo sysctl -w fs.inotify.max_user_instances=8192 (persist in /etc/sysctl.d/)" >&2
 fi
 
-echo "Creating kind configuration for cluster '${KIND_CLUSTER_NAME}' (ipFamily=${IP_FAMILY})..."
+echo "Creating kind configuration for cluster '${KIND_CLUSTER_NAME}' (ipFamily=${IP_FAMILY}, workers=${KIND_WORKERS})..."
 cat <<EOF > "${ROOT}/bin/kind-config.yaml"
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
-- role: control-plane
 EOF
-if [ "${HAS_KVM}" = "1" ]; then
-  cat <<EOF >> "${ROOT}/bin/kind-config.yaml"
+# With workers, kind taints the control plane and every workload lands on the
+# workers, so each node gets the same mounts.
+for role in control-plane $(for ((i = 0; i < KIND_WORKERS; i++)); do echo worker; done); do
+  echo "- role: ${role}" >> "${ROOT}/bin/kind-config.yaml"
+  if [ "${HAS_KVM}" = "1" ]; then
+    cat <<EOF >> "${ROOT}/bin/kind-config.yaml"
   # Bind-mount /dev/kvm into the node so micro-VM (kata + cloud-hypervisor)
   # worker pods can use KVM.
   extraMounts:
   - hostPath: /dev/kvm
     containerPath: /dev/kvm
 EOF
-fi
+  fi
+done
 cat <<EOF >> "${ROOT}/bin/kind-config.yaml"
 # cmd/podcertcontroller depends on ClusterTrustBundle & PodCertificateRequest.
 # They are not enabled by default as of Kubernetes v1.36
