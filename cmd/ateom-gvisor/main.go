@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"sort"
 	"sync"
@@ -778,12 +779,32 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 			return nil, fmt.Errorf("while archiving durable-dir volumes: %w", tarErr)
 		}
 	case ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY:
-		// Checkpoint pause container (root of the sandbox)
-		// TODO: Consider pause -> tar -> resume -> checkpoint order for better failure handling.
-		err := rcmd.cmdCheckpoint(ctx, ocispec.PauseContainer, checkpointPath)
-		timing.checkpoint = lap(&tLast)
-		if err != nil {
-			return nil, fmt.Errorf("while checkpointing pause: %w", err)
+		// A retried checkpoint finds the image a previous attempt wrote and the
+		// sandbox that attempt already stopped (its caller went away during the
+		// teardown below). Reuse the image: `runsc checkpoint` against the gone
+		// container fails, and that failure crashes an actor whose state is
+		// safely on disk.
+		pauseStatus := func(ctx context.Context) (string, error) { return rcmd.cmdStatus(ctx, ocispec.PauseContainer) }
+		if previousCheckpointReusable(ctx, pauseStatus, checkpointPath) {
+			slog.InfoContext(ctx, "Reusing the checkpoint image of a previous attempt",
+				slog.String("actor", attribution.Ref.String()),
+				slog.String("actorUID", attribution.UID))
+			timing.checkpoint = lap(&tLast)
+		} else {
+			// gVisor creates its image files with O_EXCL: clear what an earlier
+			// attempt left behind so a fresh checkpoint can be written.
+			if stale, err := listSnapshotFiles(checkpointPath); err == nil {
+				for _, f := range stale {
+					_ = os.Remove(filepath.Join(checkpointPath, f))
+				}
+			}
+			// Checkpoint pause container (root of the sandbox)
+			// TODO: Consider pause -> tar -> resume -> checkpoint order for better failure handling.
+			err := rcmd.cmdCheckpoint(ctx, ocispec.PauseContainer, checkpointPath)
+			timing.checkpoint = lap(&tLast)
+			if err != nil {
+				return nil, fmt.Errorf("while checkpointing pause: %w", err)
+			}
 		}
 		if hasDurableVolumes(req.GetSpec().GetContainers()) {
 			var err error
@@ -800,14 +821,18 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	// Cleanup the containers after checkpointing. This also unhosts the actor,
 	// before the snapshot listing below can fail.
 	// This is best-effort cleanup for actor containers that may have been left behind after checkpointing.
-	if err := s.terminateWorkload(ctx, attribution.Ref, attribution.UID, req.GetRunscPath(), req.GetActorDirs(), req.GetSpec().GetContainers()); err != nil {
+	// Detached from the caller: the state is saved, and a caller that goes away
+	// now must not leave the networking half torn down for the retry to trip on.
+	teardownCtx, cancelTeardown := context.WithTimeout(context.WithoutCancel(ctx), checkpointTeardownTimeout)
+	defer cancelTeardown()
+	if err := s.terminateWorkload(teardownCtx, attribution.Ref, attribution.UID, req.GetRunscPath(), req.GetActorDirs(), req.GetSpec().GetContainers()); err != nil {
 		slog.WarnContext(ctx, "failed to terminate workload after checkpoint",
 			slog.String("actor", attribution.Ref.String()),
 			slog.String("actorUID", attribution.UID),
 			slog.Any("err", err))
 	}
 	timing.teardown = lap(&tLast)
-	s.recordFinalIfEnded(ctx, hosted)
+	s.recordFinalIfEnded(teardownCtx, hosted)
 
 	// Report exactly the files runsc wrote so atelet ships precisely this set
 	// (checkpoint.img plus any pages images), rather than a hardcoded list.
@@ -819,6 +844,31 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor checkpointed", attribution)
 
 	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles, DataSnapshotFiles: durableFiles}, nil
+}
+
+// checkpointTeardownTimeout bounds the container and network cleanup that
+// follows a checkpoint; it runs detached from the caller's context.
+const checkpointTeardownTimeout = 60 * time.Second
+
+// checkpointImageFile is the file `runsc checkpoint` always writes.
+const checkpointImageFile = "checkpoint.img"
+
+// previousCheckpointReusable reports whether checkpointPath already holds the
+// image of an earlier attempt whose sandbox no longer runs, so a retried
+// checkpoint can ship that image instead of checkpointing a gone container.
+// status returns the pause container's OCI status, or an error when runsc has
+// no record of it.
+func previousCheckpointReusable(ctx context.Context, status func(context.Context) (string, error), checkpointPath string) bool {
+	info, err := os.Stat(filepath.Join(checkpointPath, checkpointImageFile))
+	if err != nil || info.Size() == 0 {
+		return false
+	}
+	st, err := status(ctx)
+	if err != nil {
+		// No container record: the previous attempt's teardown got that far.
+		return true
+	}
+	return st != "running"
 }
 
 // listSnapshotFiles returns the (relative) names of regular files directly under

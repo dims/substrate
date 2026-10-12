@@ -19,6 +19,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -359,6 +360,32 @@ func (r *runsc) cmdState(ctx context.Context, containerName string) error {
 }
 
 // cmdList returns the container IDs runsc has a record of.
+// cmdStatus returns the container's OCI state status ("running", "stopped",
+// ...), or an error when runsc has no record of the container.
+func (r *runsc) cmdStatus(ctx context.Context, containerName string) (string, error) {
+	cmd := exec.CommandContext(
+		ctx,
+		r.path,
+		"-log-format", "json",
+		"-root", runscStateDir(r.actorDirs),
+		"state",
+		containerName,
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = os.Stderr
+	if err := reaper.RunCommand(cmd); err != nil {
+		return "", fmt.Errorf("while running `runsc state`: %w", err)
+	}
+	var state struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &state); err != nil {
+		return "", fmt.Errorf("while parsing `runsc state` output: %w", err)
+	}
+	return state.Status, nil
+}
+
 func (r *runsc) cmdList(ctx context.Context) ([]string, error) {
 	cmd := exec.CommandContext(
 		ctx,
