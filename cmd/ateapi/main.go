@@ -77,7 +77,7 @@ var (
 	postgresReadWriteRole             = pflag.String("postgres-read-write-role", "", "Required PostgreSQL role assumed by read/write connections.")
 	postgresOwnerRole                 = pflag.String("postgres-owner-role", "", "Required PostgreSQL role assumed by owner connections.")
 	postgresSchema                    = pflag.String("postgres-schema", "substrate", "PostgreSQL schema for Substrate tables. This overrides a search_path connection parameter.")
-	postgresPoolMaxConns              = pflag.Int32("postgres-pool-max-conns", 0, "Maximum connections in the shared Substrate and OpenFGA read/write PostgreSQL pool. Does not affect the owner or watch pools. The DSN or pgx default is used when unset.")
+	postgresPoolMaxConns              = pflag.Int32("postgres-pool-max-conns", 20, "Maximum connections in the shared Substrate and OpenFGA read/write PostgreSQL pool. Does not affect the owner or watch pools. 0 uses the DSN or pgx default, one connection per CPU, which exhausts PostgreSQL's 100 default slots on large hosts.")
 	experimentalEnableAuthz           = pflag.Bool("experimental-enable-authz", false, "Enforce OpenFGA authorization checks on all registered RPCs (experimental). AccessPolicy RPCs are always checked.")
 	// TODO: Move the authz settings into the hot-reloadable config proto
 	// (agent-substrate/substrate#2021) once it lands, so bootstrap owner
