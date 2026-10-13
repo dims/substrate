@@ -247,6 +247,12 @@ func (e *Env) applyWithAPIServerEnvHash(ctx context.Context, manifest []byte) er
 	if err != nil {
 		return err
 	}
+	return e.applyObjectsWithAPIServerEnvHash(ctx, objs)
+}
+
+// applyObjectsWithAPIServerEnvHash is applyWithAPIServerEnvHash for objects the
+// caller has already decoded and perhaps edited.
+func (e *Env) applyObjectsWithAPIServerEnvHash(ctx context.Context, objs []*unstructured.Unstructured) error {
 	hash, err := e.apiServerEnvHash(ctx)
 	if err != nil {
 		return err
