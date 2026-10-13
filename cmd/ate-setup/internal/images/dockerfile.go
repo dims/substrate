@@ -68,6 +68,18 @@ func dockerfilePlatforms(rootDir, koDefaultPlatforms string) (string, error) {
 	return strings.Join(koConfig.DefaultPlatforms, ","), nil
 }
 
+// RequireBuildx fails with the fix when `docker buildx version` does not
+// answer. Checked before any build: the Dockerfile image comes after every ko image.
+func RequireBuildx(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, "docker", "buildx", "version").CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("docker buildx is needed to build the Dockerfile images (%v: %s); "+
+		"install the buildx plugin (apt-get install docker-buildx on Debian and Ubuntu) or use --image-repo and --image-tag",
+		err, strings.TrimSpace(string(out)))
+}
+
 // dockerBuildArgs returns the docker arguments that build contextPath for
 // platforms and push it as tag. extraFlags go before the context.
 func dockerBuildArgs(platforms string, extraFlags []string, tag, contextPath string) []string {
@@ -93,6 +105,9 @@ func PublishDockerfileImage(ctx context.Context, rootDir, dockerRepo, imageName,
 	repo := strings.TrimSuffix(dockerRepo, "/") + "/" + imageName
 	stageTag := repo + ":" + tag
 
+	if err := RequireBuildx(ctx); err != nil {
+		return "", err
+	}
 	platforms, err := dockerfilePlatforms(rootDir, koDefaultPlatforms)
 	if err != nil {
 		return "", err
