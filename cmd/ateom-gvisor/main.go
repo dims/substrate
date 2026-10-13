@@ -98,10 +98,10 @@ const resumeTimeout = 30 * time.Second
 // checkpointTeardownTimeout bounds the teardown after a checkpoint, which runs detached from the caller.
 const checkpointTeardownTimeout = 60 * time.Second
 
-// terminateCleanupTimeout bounds the container cleanup of a terminate. Under a
-// burst of deletes `runsc delete` of a multi-GiB sandbox outran 30 s; the kill
-// failed the terminate and left the actor DELETING with its worker.
-const terminateCleanupTimeout = 120 * time.Second
+// terminateCleanupTimeout bounds the container cleanup of a terminate. It sits
+// above runsc's own 2 min wait for a killed sentry to exit, so a slow exit
+// under load ends with runsc's verdict rather than a killed `runsc delete`.
+const terminateCleanupTimeout = 5 * time.Minute
 
 func main() {
 	pflag.Parse()
@@ -889,24 +889,17 @@ func listSnapshotFiles(dir string) ([]string, error) {
 	return files, nil
 }
 
-// stopContainers stops the actor's application containers. The pause container
-// is left running: it is the sandbox, and cleanupContainers deletes the others
-// through it before deleting it last. Killing it first leaves the sentry a
-// zombie until reaped, which runsc delete mistakes for a live sandbox.
-func stopContainers(ctx context.Context, rcmd containerRuntime, containers []*ateompb.Container) {
-	for _, ctr := range containers {
-		_ = rcmd.cmdKill(ctx, ctr.GetName(), "SIGKILL")
-		_ = rcmd.cmdWait(ctx, ctr.GetName())
-	}
-}
-
+// cleanupContainers deletes the sandbox, then the records of its containers.
+// `runsc delete -force` of the pause (root) container kills the sentry from
+// the host and waits for its exit through a pidfd, so the teardown never
+// depends on a loaded sentry answering a control RPC; the application
+// containers' deletes then only remove state and cgroups.
 func cleanupContainers(ctx context.Context, rcmd containerRuntime, containers []*ateompb.Container) error {
-	// Application containers first, the pause (root) container last.
 	names := make([]string, 0, len(containers)+1)
+	names = append(names, ocispec.PauseContainer)
 	for _, ctr := range containers {
 		names = append(names, ctr.GetName())
 	}
-	names = append(names, ocispec.PauseContainer)
 
 	// Check state of all containers to mimic containerd.
 	// Without this, `runsc delete` occasionally throws an error.
@@ -1204,10 +1197,6 @@ func (s *AteomService) terminateWorkload(ctx context.Context, actorRef resources
 	// container without its record and the actor unrecoverable.
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), terminateCleanupTimeout)
 	defer cancel()
-	// Stop the containers before deleting them, to avoid leaving a live container
-	// with no bundle on disk. Best-effort: if they are already stopped, the
-	// delete succeeds anyway.
-	stopContainers(cleanupCtx, rcmd, containers)
 	// Keep this as best-effort cleanup: atelet resets the bundle and checkpoint
 	// directories after uploading the snapshot.
 	if err := cleanupContainers(cleanupCtx, rcmd, containers); err != nil {
