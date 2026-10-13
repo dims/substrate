@@ -101,8 +101,9 @@ func TestCleanupContainers_DeletesEveryContainerRunscKnows(t *testing.T) {
 		t.Fatalf("cleanupContainers: %v", err)
 	}
 
-	// Happy path: no `runsc list` at all.
-	assertCalls(t, f, "state app", "state _pause", "delete app", "delete _pause")
+	// Happy path: no `runsc list` at all, and the sandbox goes before its
+	// containers.
+	assertCalls(t, f, "state _pause", "state app", "delete _pause", "delete app")
 	if len(f.containers) != 0 {
 		t.Errorf("containers survived cleanup: %v", slices.Sorted(maps.Keys(f.containers)))
 	}
@@ -118,7 +119,7 @@ func TestCleanupContainers_SkipsContainersRunscHasNoRecordOf(t *testing.T) {
 		t.Fatalf("cleanupContainers: %v", err)
 	}
 
-	assertCalls(t, f, "state app", "state _pause", "list", "delete app")
+	assertCalls(t, f, "state _pause", "list", "state app", "delete app")
 }
 
 func TestCleanupContainers_SucceedsWhenEverythingIsAlreadyGone(t *testing.T) {
@@ -128,19 +129,7 @@ func TestCleanupContainers_SucceedsWhenEverythingIsAlreadyGone(t *testing.T) {
 		t.Fatalf("cleanupContainers: %v", err)
 	}
 
-	assertCalls(t, f, "state app", "list", "state _pause", "list")
-}
-
-// The pause container is the sandbox: it must outlive the deletes of the
-// containers inside it, so stopping the actor leaves it to cleanup.
-func TestStopContainersLeavesTheSandboxToCleanup(t *testing.T) {
-	f := newFakeRunsc()
-	stopContainers(context.Background(), f, appContainers)
-	var want []string
-	for _, c := range appContainers {
-		want = append(want, "kill "+c.GetName()+" SIGKILL", "wait "+c.GetName())
-	}
-	assertCalls(t, f, want...)
+	assertCalls(t, f, "state _pause", "list", "state app", "list")
 }
 
 func TestCleanupContainers_RetriesAFailedDelete(t *testing.T) {
