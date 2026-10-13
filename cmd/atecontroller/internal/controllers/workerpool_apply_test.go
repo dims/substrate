@@ -847,7 +847,9 @@ func expectedDeploymentApplyConfig(mutatePodSpec func(*corev1ac.PodSpecApplyConf
 			WithReadinessProbe(corev1ac.Probe().
 				WithHTTPGet(corev1ac.HTTPGetAction().
 					WithPath("/readyz").
-					WithPort(intstr.FromString("readyz")))).
+					WithPort(intstr.FromString("readyz"))).
+				WithTimeoutSeconds(5).
+				WithFailureThreshold(6)).
 			WithSecurityContext(corev1ac.SecurityContext().
 				WithRunAsUser(0).
 				WithRunAsGroup(0).
