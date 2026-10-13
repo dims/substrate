@@ -92,6 +92,9 @@ const minUsageSampleInterval = 50 * time.Second
 // kubelet SIGKILL of ateom itself.
 const workloadGracePeriod = 30 * time.Minute
 
+// checkpointTeardownTimeout bounds the teardown after a checkpoint, which runs detached from the caller.
+const checkpointTeardownTimeout = 60 * time.Second
+
 func main() {
 	pflag.Parse()
 	if *showVersion {
@@ -444,7 +447,7 @@ var containerKillTimeout = 5 * time.Second
 type containerRuntime interface {
 	cmdKill(ctx context.Context, containerName, signal string) error
 	cmdWait(ctx context.Context, containerName string) error
-	cmdState(ctx context.Context, containerName string) error
+	cmdState(ctx context.Context, containerName string) (string, error)
 	cmdDelete(ctx context.Context, containerName string) error
 	cmdList(ctx context.Context) ([]string, error)
 }
@@ -766,12 +769,28 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 			return nil, fmt.Errorf("while checkpointing durable-dir volumes: %w", err)
 		}
 	case ateompb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY:
-		// Checkpoint pause container (root of the sandbox), splitting durable-dir
-		// volumes into <checkpointPath>/fs when present.
-		err := rcmd.cmdCheckpoint(ctx, ocispec.PauseContainer, checkpointPath, durablePaths)
-		timing.checkpoint = lap(&tLast)
-		if err != nil {
-			return nil, fmt.Errorf("while checkpointing pause: %w", err)
+		// A retry after a cancelled teardown finds the image already written and
+		// the sandbox gone; checkpointing it again fails and crashes the actor.
+		pauseStatus := func(ctx context.Context) (string, error) { return rcmd.cmdState(ctx, ocispec.PauseContainer) }
+		if previousCheckpointReusable(ctx, pauseStatus, checkpointPath) {
+			slog.InfoContext(ctx, "Reusing the checkpoint image of a previous attempt",
+				slog.String("actor", attribution.Ref.String()),
+				slog.String("actorUID", attribution.UID))
+			timing.checkpoint = lap(&tLast)
+		} else {
+			// runsc opens its image files with O_EXCL; drop a partial earlier attempt.
+			if stale, err := listSnapshotFiles(checkpointPath); err == nil {
+				for _, f := range stale {
+					_ = os.Remove(filepath.Join(checkpointPath, f))
+				}
+			}
+			// Checkpoint pause container (root of the sandbox), splitting durable-dir
+			// volumes into <checkpointPath>/fs when present.
+			err := rcmd.cmdCheckpoint(ctx, ocispec.PauseContainer, checkpointPath, durablePaths)
+			timing.checkpoint = lap(&tLast)
+			if err != nil {
+				return nil, fmt.Errorf("while checkpointing pause: %w", err)
+			}
 		}
 	default:
 		return nil, fmt.Errorf("unsupported snapshot fidelity: %v", fidelity)
@@ -780,14 +799,17 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	// Cleanup the containers after checkpointing. This also unhosts the actor,
 	// before the snapshot listing below can fail.
 	// This is best-effort cleanup for actor containers that may have been left behind after checkpointing.
-	if err := s.terminateWorkload(ctx, attribution.Ref, attribution.UID, req.GetRunscPath(), req.GetActorDirs(), req.GetSpec().GetContainers()); err != nil {
+	// Detached from the caller: a cancellation here leaves a half torn down sandbox.
+	teardownCtx, cancelTeardown := context.WithTimeout(context.WithoutCancel(ctx), checkpointTeardownTimeout)
+	defer cancelTeardown()
+	if err := s.terminateWorkload(teardownCtx, attribution.Ref, attribution.UID, req.GetRunscPath(), req.GetActorDirs(), req.GetSpec().GetContainers()); err != nil {
 		slog.WarnContext(ctx, "failed to terminate workload after checkpoint",
 			slog.String("actor", attribution.Ref.String()),
 			slog.String("actorUID", attribution.UID),
 			slog.Any("err", err))
 	}
 	timing.teardown = lap(&tLast)
-	s.recordFinalIfEnded(ctx, hosted)
+	s.recordFinalIfEnded(teardownCtx, hosted)
 
 	// Report exactly the files runsc wrote so atelet ships precisely this set
 	// (checkpoint.img plus any pages images and fs/ durable-dir files), rather
@@ -801,6 +823,21 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor checkpointed", attribution)
 
 	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles, DataSnapshotFiles: durableFiles}, nil
+}
+
+// previousCheckpointReusable reports whether checkpointPath holds the image of
+// an earlier attempt whose sandbox no longer runs. status is the pause
+// container's OCI status, or an error when runsc has no record of it.
+func previousCheckpointReusable(ctx context.Context, status func(context.Context) (string, error), checkpointPath string) bool {
+	info, err := os.Stat(filepath.Join(checkpointPath, "checkpoint.img"))
+	if err != nil || info.Size() == 0 {
+		return false
+	}
+	st, err := status(ctx)
+	if err != nil {
+		return true
+	}
+	return st != "running"
 }
 
 // listSnapshotFiles returns the (relative) names of regular files directly under
@@ -852,7 +889,7 @@ func cleanupContainers(ctx context.Context, rcmd containerRuntime, containers []
 	// Without this, `runsc delete` occasionally throws an error.
 	present := make([]string, 0, len(names))
 	for _, name := range names {
-		if err := rcmd.cmdState(ctx, name); err != nil {
+		if _, err := rcmd.cmdState(ctx, name); err != nil {
 			err = fmt.Errorf("while checking state of %q container: %w", name, err)
 			gone, listErr := isContainerAlreadyGone(ctx, rcmd, name)
 			if listErr != nil {
