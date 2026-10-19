@@ -77,16 +77,10 @@ func reseedGuestCRNG(ctx context.Context, ac *kata.AgentClient) error {
 	if err != nil {
 		return err
 	}
-	rctx, cancel := context.WithTimeout(ctx, reseedTimeout)
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	return ac.ReseedRandomDev(rctx, nonce)
 }
-
-// reseedTimeout bounds the ReseedRandomDev call. The kata-agent of a guest that has just
-// resumed answers late when many guests resume at once: at 5 s, 3 of 64 restores started
-// together on a loaded host crashed with DeadlineExceeded. A failed reseed still fails the
-// restore; it only gets the time a restore wave needs.
-const reseedTimeout = 60 * time.Second
 
 // newReseedNonce returns 32 bytes of fresh entropy to mix into the guest CRNG.
 func newReseedNonce() ([]byte, error) {
