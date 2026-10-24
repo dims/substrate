@@ -167,7 +167,7 @@ if [[ "${REPO}" == "${UPSTREAM_REPO}" ]]; then
     notes+='```'
   fi
   notes+=$'\n\nEach image has a build provenance attestation:\n\n```sh\n'
-  notes+="gh attestation verify oci://${RELEASE_IMAGE_REPO}/ateapi:${tag} --repo ${REPO}"$'\n'
+  notes+="gh attestation verify oci://${RELEASE_IMAGE_REPO}/ateapi:${tag} --repo ${REPO} --signer-workflow ${REPO}/.github/workflows/release.yaml"$'\n'
   notes+='```'
   # The workflow attaches these after creating the draft; see the
   # "Attach kubectl-ate" step in .github/workflows/release.yaml.
@@ -176,7 +176,7 @@ if [[ "${REPO}" == "${UPSTREAM_REPO}" ]]; then
   notes+=" Download the binary for your platform and its \`.sha256\` file, check both, and put it on your \`PATH\` as \`kubectl-ate\`:"
   notes+=$'\n\n```sh\n'
   notes+=$'shasum -a 256 -c kubectl-ate-linux-amd64.sha256\n'
-  notes+="gh attestation verify kubectl-ate-linux-amd64 --repo ${REPO}"$'\n'
+  notes+="gh attestation verify kubectl-ate-linux-amd64 --repo ${REPO} --signer-workflow ${REPO}/.github/workflows/release.yaml"$'\n'
   notes+=$'install -m 0755 kubectl-ate-linux-amd64 ~/.local/bin/kubectl-ate\n'
   notes+='```'
 fi

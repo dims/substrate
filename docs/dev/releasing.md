@@ -8,15 +8,15 @@ Pushing a `vX.Y.Z` or `vX.Y.Z-PRERELEASE` tag publishes that commit's images to 
 
 A tag ruleset on `agent-substrate/substrate` that restricts creating, updating, and deleting `v[0-9]*` tags to release managers enforces this for tag pushes. An organization admin maintains it, and it has to be in place before the first release that publishes images.
 
-The ruleset limits tag pushes only. Anyone with write access can still publish images: they can start this workflow from the Actions tab, from `main` or a release branch, and publish or overwrite the images of a tag whose release is still a draft. A second ruleset blocks every other branch, so a workflow pushed on one is not a route. Once a tag's release is published, this workflow publishes nothing for it. Overwriting changes the digests, and the draft's notes still list the old ones, so delete the draft and run the workflow again after an overwrite.
+The ruleset limits tag pushes only. Anyone with write access can still publish images: they can start this workflow from the Actions tab for a tag, and publish or overwrite the images of a tag whose release is still a draft. A second ruleset blocks every branch but `main` and `release-*`, so a workflow pushed on another branch is not a route. Once a tag's release is published, this workflow publishes nothing for it. Overwriting changes the digests, and the draft's notes still list the old ones, so delete the draft and run the workflow again after an overwrite.
 
 ## Cut a release
 
 1. Tag the release commit and push the tag. The [`release`](../../.github/workflows/release.yaml) workflow does two things, in order:
-   1. The `images` job runs `ate-setup publish release-images`, which builds every release image for `linux/amd64` and `linux/arm64`, pushes it to `ghcr.io/agent-substrate/substrate/<image>:<tag>`, checks that every tag names the image just pushed, for both platforms, and writes the digests to the `release-images` artifact. The job then attests the images (see [Provenance](#provenance)). Every release image is built with `ko`, which cross-compiles for arm64 without emulation.
+   1. The `images` job runs `ate-setup publish release-images`, which builds every release image for `linux/amd64` and `linux/arm64`, pushes it to `ghcr.io/agent-substrate/substrate/<image>:<tag>`, checks that every tag names the image just pushed, for both platforms, and writes the digests of the images it pushed to a file. The job attests those images from it (see [Provenance](#provenance)) and uploads the file as the `release-images` artifact. A rerun that finds the set complete builds nothing; it verifies instead that each image's attestation came from this workflow, and fails on one that did not, which `overwrite` rebuilds. Every release image is built with `ko`, which cross-compiles for arm64 without emulation.
    2. Once the images are verified, the `draft` job builds the `kubectl-ate` binaries with `ate-setup publish release-binaries`, attests them, then runs [`hack/release/draft-release.sh`](../../hack/release/draft-release.sh), which creates a draft release, and attaches the binaries to it. The notes cover every change since the previous `vX.Y.Z` release, list the release images by digest and link to the list below, give the steps to check, verify and install `kubectl-ate`, and end with a list of committers. A release candidate is marked as a prerelease.
 
-   If the `images` job or the binary build fails, no draft is created. If attaching the binaries fails, the draft exists without them. Either way, fix the cause and run the workflow again from the Actions tab with the tag as input.
+   If the `images` job or the binary build fails, no draft is created. If attaching the binaries fails, the draft exists without them. Either way, fix the cause and run the workflow again from the tag.
 2. Edit the draft:
    - Write a summary at the top.
    - Rewrite each breaking change with its upgrade step.
@@ -24,7 +24,13 @@ The ruleset limits tag pushes only. Anyone with write access can still publish i
    - Remove Other Changes entries users do not need, and move entries that landed in the wrong section.
 3. Publish the release.
 
-If the workflow did not run, start it from the Actions tab with the tag as input, or run the script with an authenticated `gh` that has write access to the repository:
+If the workflow did not run, start it from the tag, with the tag as the input too. The jobs refuse a run started from another ref, because the attestations name the commit the run started from:
+
+```sh
+gh workflow run release.yaml --ref v1.0.0 -f tag=v1.0.0
+```
+
+Or run the script with an authenticated `gh` that has write access to the repository:
 
 ```sh
 hack/release/draft-release.sh --dry-run v0.3.0   # print the notes only
@@ -67,11 +73,11 @@ The images are built from the work tree, so it must hold the tag and nothing els
 Every release image and `kubectl-ate` binary has a build provenance attestation: a signed statement, made by the workflow run that built it through GitHub's Sigstore instance, naming the artifact by digest and the commit, workflow and run that produced it ([`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance)). GitHub stores it on the repository. To verify an image or a downloaded binary:
 
 ```sh
-gh attestation verify oci://ghcr.io/agent-substrate/substrate/ateapi:v1.0.0 --repo agent-substrate/substrate
-gh attestation verify kubectl-ate-linux-amd64 --repo agent-substrate/substrate
+gh attestation verify oci://ghcr.io/agent-substrate/substrate/ateapi:v1.0.0 --repo agent-substrate/substrate --signer-workflow agent-substrate/substrate/.github/workflows/release.yaml
+gh attestation verify kubectl-ate-linux-amd64 --repo agent-substrate/substrate --signer-workflow agent-substrate/substrate/.github/workflows/release.yaml
 ```
 
-A verified attestation proves the artifact was built by this repository's `release` workflow from the commit it names. It does not pin a tag: a registry tag can be moved, so install by the digests the notes list where that matters.
+`--signer-workflow` is what ties the artifact to this repository's `release` workflow; `--repo` alone accepts any workflow in the repository. A verified attestation proves the workflow built the artifact from the commit it names. It does not pin a tag: a registry tag can be moved, so install by the digests the notes list where that matters.
 
 Immutable releases are a repository or organization setting, and an organization owner or repository admin has to turn it on before the first `v1.0.0` release. From then on GitHub locks a published release's assets and tag, attests the assets itself, and `gh release verify-asset <tag> <file>` checks a download against that. Drafts stay editable, so this workflow's flow does not change. Registry tags are outside it, which is why the `images` job keeps refusing to publish for a published release.
 
@@ -85,7 +91,7 @@ To check, verify and install one:
 
 ```sh
 shasum -a 256 -c kubectl-ate-linux-amd64.sha256
-gh attestation verify kubectl-ate-linux-amd64 --repo agent-substrate/substrate
+gh attestation verify kubectl-ate-linux-amd64 --repo agent-substrate/substrate --signer-workflow agent-substrate/substrate/.github/workflows/release.yaml
 install -m 0755 kubectl-ate-linux-amd64 ~/.local/bin/kubectl-ate
 ```
 

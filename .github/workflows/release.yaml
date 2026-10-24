@@ -23,10 +23,11 @@
 # images job is skipped, because GitHub bills package storage to the fork's
 # owner, and the draft is created as before.
 #
-# Run manually to publish images or draft a release for an existing tag.
-# A complete image set is left unchanged unless overwrite is set; an incomplete
-# one is rebuilt in full. Nothing is published for a tag whose release is
-# published, and only a draft gets its binaries replaced.
+# Run manually, from the tag, to publish images or draft a release for an
+# existing tag. A complete image set is left unchanged unless overwrite is set,
+# and its attestations are verified instead of renewed; an incomplete one is
+# rebuilt in full. Nothing is published for a tag whose release is published,
+# and only a draft gets its binaries replaced.
 name: release
 on:
   push:
@@ -72,8 +73,8 @@ jobs:
       KO_DEFAULTPLATFORMS: linux/amd64,linux/arm64
       # inputs.overwrite is empty on a tag push; this makes the value explicit.
       ATE_PUBLISH_OVERWRITE: ${{ inputs.overwrite == true }}
-      # One "<sha256 hex>  <image>" line per release image, attested below and
-      # listed in the draft notes.
+      # One "<sha256 hex>  <image>" line per image this run pushes, attested
+      # below and listed in the draft notes. Absent when nothing was built.
       ATE_PUBLISH_DIGESTS_FILE: bin/release-images.txt
     steps:
     - name: Checkout
@@ -88,6 +89,12 @@ jobs:
         # These jobs can write packages or releases, so they restore no cache
         # that another workflow could have written.
         cache: false
+    # The attestations name the commit this run started from, so it has to
+    # be the tag's commit. A manual run is started from the tag.
+    - name: Check the run is for the tag's commit
+      env:
+        TAG: ${{ inputs.tag || github.ref_name }}
+      run: .github/scripts/release/check-release-ref.sh
     # Every release image is built with ko, which cross-compiles Go for arm64
     # without emulation, so the job needs neither QEMU nor buildx. ko and
     # ate-setup's registry checks read the credentials docker login stores.
@@ -108,18 +115,30 @@ jobs:
     # every platform.
     - name: Publish images
       run: go run ./cmd/ate-setup publish release-images
+    # One provenance statement naming every image this run pushed, by digest.
+    # `gh attestation verify oci://<image>:<tag> --repo agent-substrate/substrate
+    # --signer-workflow agent-substrate/substrate/.github/workflows/release.yaml`
+    # checks it.
+    - name: Attest the images
+      if: hashFiles('bin/release-images.txt') != ''
+      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      with:
+        subject-checksums: bin/release-images.txt
+    # A rerun that found the set complete built nothing. Its images were
+    # attested by the run that built them; check that instead of attesting
+    # them again, and refuse one that was not.
+    - name: Verify the published images
+      if: hashFiles('bin/release-images.txt') == ''
+      env:
+        GH_TOKEN: ${{ github.token }}
+        DIGESTS_FILE: bin/release-images.txt
+      run: .github/scripts/release/verify-image-attestations.sh
     - name: Upload the image digests
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         name: release-images
         path: bin/release-images.txt
         if-no-files-found: error
-    # One provenance statement naming every image by digest. `gh attestation
-    # verify oci://<image>:<tag> --repo agent-substrate/substrate` checks it.
-    - name: Attest the images
-      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-      with:
-        subject-checksums: bin/release-images.txt
   # The same build and checks against a registry that exists only for the
   # duration of this job. Runs only when started manually with dry_run_images.
   images-dry-run:
@@ -187,6 +206,12 @@ jobs:
         # These jobs can write packages or releases, so they restore no cache
         # that another workflow could have written.
         cache: false
+    # The attestations name the commit this run started from, so it has to
+    # be the tag's commit. A manual run is started from the tag.
+    - name: Check the run is for the tag's commit
+      env:
+        TAG: ${{ inputs.tag || github.ref_name }}
+      run: .github/scripts/release/check-release-ref.sh
     # Built before the draft exists, so a build failure leaves no draft, as an
     # images failure does. A fork attaches no binaries, so it builds none.
     - name: Build kubectl-ate
@@ -195,7 +220,8 @@ jobs:
         VERSION: ${{ inputs.tag || github.ref_name }}
       run: go run ./cmd/ate-setup publish release-binaries --out bin/release
     # One provenance statement for the four binaries, not their .sha256
-    # files. `gh attestation verify <file> --repo agent-substrate/substrate`
+    # files. `gh attestation verify <file> --repo agent-substrate/substrate
+    # --signer-workflow agent-substrate/substrate/.github/workflows/release.yaml`
     # checks a download against it.
     - name: Attest kubectl-ate
       if: github.repository == 'agent-substrate/substrate'
