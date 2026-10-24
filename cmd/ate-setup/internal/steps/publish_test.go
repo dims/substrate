@@ -17,7 +17,9 @@ package steps
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
+	"io/fs"
 	"log"
 	"net/http/httptest"
 	"os"
@@ -99,8 +101,59 @@ func TestPublishReleaseImagesSkipsACompleteRelease(t *testing.T) {
 		KODockerRepo:       repo,
 		KODefaultPlatforms: "linux/amd64,linux/arm64",
 	}}
-	if err := e.PublishReleaseImages(t.Context(), io.Discard, PublishReleaseOptions{}); err != nil {
-		t.Errorf("PublishReleaseImages() error = %v, want nil with every image published", err)
+	// A digests file from an earlier run must not survive a run that built
+	// nothing: the release workflow would attest its contents as this run's.
+	digestsFile := filepath.Join(t.TempDir(), "release-images.txt")
+	if err := os.WriteFile(digestsFile, []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.PublishReleaseImages(t.Context(), io.Discard, PublishReleaseOptions{DigestsFile: digestsFile}); err != nil {
+		t.Fatalf("PublishReleaseImages() error = %v, want nil with every image published", err)
+	}
+	if _, err := os.Stat(digestsFile); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("os.Stat(digests file) error = %v, want it removed when nothing was built", err)
+	}
+
+	// Listing resolves every release image to the digest its tag names, in
+	// the form the release workflow verifies attestations from.
+	var out strings.Builder
+	if err := e.PublishReleaseImages(t.Context(), &out, PublishReleaseOptions{ListPublished: true}); err != nil {
+		t.Fatalf("PublishReleaseImages(ListPublished) error = %v", err)
+	}
+	digest, err := index.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	for _, pkg := range images.ReleaseComponents() {
+		want = append(want, repo+"/"+images.ImageName(pkg)+":v1.2.3@"+digest.String())
+	}
+	if got := strings.Split(strings.TrimSpace(out.String()), "\n"); !slices.Equal(got, want) {
+		t.Errorf("PublishReleaseImages(ListPublished) printed %q, want %q", got, want)
+	}
+}
+
+// The digests file lists each image once, by repository and sha256, sorted,
+// from either reference form ko prints.
+func TestWriteDigestsFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bin", "release-images.txt")
+	refs := []string{
+		"example.com/substrate/atelet:v1@sha256:" + strings.Repeat("b", 64),
+		"example.com/substrate/ateapi@sha256:" + strings.Repeat("a", 64),
+	}
+	if err := writeDigestsFile(path, refs); err != nil {
+		t.Fatalf("writeDigestsFile() error = %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Repeat("a", 64) + "  example.com/substrate/ateapi\n" + strings.Repeat("b", 64) + "  example.com/substrate/atelet\n"
+	if string(got) != want {
+		t.Errorf("digests file = %q, want %q", got, want)
+	}
+	if err := writeDigestsFile(path, []string{"example.com/substrate/ateapi:v1"}); err == nil {
+		t.Error("writeDigestsFile() = nil for a reference without a digest, want an error")
 	}
 }
 

@@ -8,13 +8,13 @@ Pushing a `vX.Y.Z` or `vX.Y.Z-PRERELEASE` tag publishes that commit's images to 
 
 A tag ruleset on `agent-substrate/substrate` that restricts creating, updating, and deleting `v[0-9]*` tags to release managers enforces this for tag pushes. An organization admin maintains it, and it has to be in place before the first release that publishes images.
 
-The ruleset limits tag pushes only. Anyone with write access can still publish images: they can start this workflow from the Actions tab, from any branch, and publish or overwrite the images of a tag whose release is still a draft, and a workflow on a branch they push can request `packages: write` as well. Once a tag's release is published, this workflow publishes nothing for it.
+The ruleset limits tag pushes only. Anyone with write access can still publish images: they can start this workflow from the Actions tab, from `main` or a release branch, and publish or overwrite the images of a tag whose release is still a draft. A second ruleset blocks every other branch, so a workflow pushed on one is not a route. Once a tag's release is published, this workflow publishes nothing for it. Overwriting changes the digests, and the draft's notes still list the old ones, so delete the draft and run the workflow again after an overwrite.
 
 ## Cut a release
 
 1. Tag the release commit and push the tag. The [`release`](../../.github/workflows/release.yaml) workflow does two things, in order:
-   1. The `images` job runs `ate-setup publish release-images`, which builds every release image for `linux/amd64` and `linux/arm64`, pushes it to `ghcr.io/agent-substrate/substrate/<image>:<tag>`, and then checks that every tag names the image just pushed, for both platforms. Every release image is built with `ko`, which cross-compiles for arm64 without emulation.
-   2. Once the images are verified, the `draft` job builds the `kubectl-ate` binaries with `ate-setup publish release-binaries`, then runs [`hack/release/draft-release.sh`](../../hack/release/draft-release.sh), which creates a draft release, and attaches the binaries to it. The notes cover every change since the previous `vX.Y.Z` release, say where the release images are published and link to the list below, give the steps to check and install `kubectl-ate`, and end with a list of committers. A release candidate is marked as a prerelease.
+   1. The `images` job runs `ate-setup publish release-images`, which builds every release image for `linux/amd64` and `linux/arm64`, pushes it to `ghcr.io/agent-substrate/substrate/<image>:<tag>`, checks that every tag names the image just pushed, for both platforms, and writes the digests to the `release-images` artifact. The job then attests the images (see [Provenance](#provenance)). Every release image is built with `ko`, which cross-compiles for arm64 without emulation.
+   2. Once the images are verified, the `draft` job builds the `kubectl-ate` binaries with `ate-setup publish release-binaries`, attests them, then runs [`hack/release/draft-release.sh`](../../hack/release/draft-release.sh), which creates a draft release, and attaches the binaries to it. The notes cover every change since the previous `vX.Y.Z` release, list the release images by digest and link to the list below, give the steps to check, verify and install `kubectl-ate`, and end with a list of committers. A release candidate is marked as a prerelease.
 
    If the `images` job or the binary build fails, no draft is created. If attaching the binaries fails, the draft exists without them. Either way, fix the cause and run the workflow again from the Actions tab with the tag as input.
 2. Edit the draft:
@@ -62,16 +62,30 @@ VERSION=v0.3.0 KO_DEFAULTPLATFORMS=linux/amd64,linux/arm64 \
 
 The images are built from the work tree, so it must hold the tag and nothing else. The build needs only Go and `ko`, which `ate-setup` runs from `hack/tools/ko`.
 
+## Provenance
+
+Every release image and `kubectl-ate` binary has a build provenance attestation: a signed statement, made by the workflow run that built it through GitHub's Sigstore instance, naming the artifact by digest and the commit, workflow and run that produced it ([`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance)). GitHub stores it on the repository. To verify an image or a downloaded binary:
+
+```sh
+gh attestation verify oci://ghcr.io/agent-substrate/substrate/ateapi:v1.0.0 --repo agent-substrate/substrate
+gh attestation verify kubectl-ate-linux-amd64 --repo agent-substrate/substrate
+```
+
+A verified attestation proves the artifact was built by this repository's `release` workflow from the commit it names. It does not pin a tag: a registry tag can be moved, so install by the digests the notes list where that matters.
+
+Immutable releases are a repository or organization setting, and an organization owner or repository admin has to turn it on before the first `v1.0.0` release. From then on GitHub locks a published release's assets and tag, attests the assets itself, and `gh release verify-asset <tag> <file>` checks a download against that. Drafts stay editable, so this workflow's flow does not change. Registry tags are outside it, which is why the `images` job keeps refusing to publish for a published release.
+
 ## Release binaries
 
 The `draft` job attaches `kubectl-ate` for `linux/amd64`, `linux/arm64`, `darwin/amd64`, and `darwin/arm64`, as raw binaries named `kubectl-ate-<os>-<arch>`, each with a `<name>.sha256` file. There is no Windows build. The binaries are static (`CGO_ENABLED=0`) and stamped with the tag, the commit, and the commit time, which `kubectl ate --version` prints.
 
 Only `agent-substrate/substrate` attaches binaries; a fork's draft has none. A rerun replaces the binaries only while the release is still a draft.
 
-To check and install one:
+To check, verify and install one:
 
 ```sh
 shasum -a 256 -c kubectl-ate-linux-amd64.sha256
+gh attestation verify kubectl-ate-linux-amd64 --repo agent-substrate/substrate
 install -m 0755 kubectl-ate-linux-amd64 ~/.local/bin/kubectl-ate
 ```
 

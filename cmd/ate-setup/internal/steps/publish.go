@@ -18,12 +18,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+
+	"github.com/google/go-containerregistry/pkg/name"
 
 	"go.ate.dev/substrate/cmd/ate-setup/internal/images"
 	"go.ate.dev/substrate/cmd/ate-setup/internal/ko"
@@ -165,6 +170,16 @@ type PublishReleaseOptions struct {
 	// Overwrite rebuilds and replaces images the registry already holds for
 	// the tag. Without it, a complete set is left alone.
 	Overwrite bool
+	// DigestsFile, when set, receives one "<sha256 hex>  <repo>/<image>" line
+	// per image this run pushed, in the form sha256sum writes. The release
+	// workflow attests exactly those images from it. A run that builds
+	// nothing removes the file, so a stale one cannot stand in for a build.
+	DigestsFile string
+	// ListPublished prints the release images the registry holds for the
+	// tag, as repo/image:tag@sha256:... lines, and builds nothing. The
+	// release workflow verifies their attestations from it when a rerun
+	// finds the set complete.
+	ListPublished bool
 }
 
 // releaseImageRefs returns the tagged reference of every image a release
@@ -198,12 +213,24 @@ func (e *Env) PublishReleaseImages(ctx context.Context, w io.Writer, opts Publis
 	if err := images.CheckReleaseTag(e.Cfg.KODockerRepo, tag); err != nil {
 		return fmt.Errorf("the build version: %w; set VERSION to the release tag", err)
 	}
+	tagged := releaseImageRefs(e.Cfg.KODockerRepo, tag)
+	if opts.ListPublished {
+		published, err := publishedDigests(ctx, tagged)
+		if err != nil {
+			return err
+		}
+		for _, ref := range published {
+			if _, err := fmt.Fprintln(w, ref); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	log.Stepf("publish_release_images (%s)", tag)
 	platforms, err := images.Platforms(e.Cfg.Root, e.Cfg.KODefaultPlatforms)
 	if err != nil {
 		return err
 	}
-	tagged := releaseImageRefs(e.Cfg.KODockerRepo, tag)
 	if !opts.Overwrite {
 		incomplete, err := images.CheckPublished(ctx, tagged, platforms)
 		if err != nil {
@@ -212,6 +239,12 @@ func (e *Env) PublishReleaseImages(ctx context.Context, w io.Writer, opts Publis
 		if len(incomplete) == 0 {
 			log.Infof("%s already holds every image for %s; nothing built. Pass --overwrite to rebuild and replace them.",
 				e.Cfg.KODockerRepo, tag)
+			if opts.DigestsFile == "" {
+				return nil
+			}
+			if err := os.Remove(opts.DigestsFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("while removing %s: %w", opts.DigestsFile, err)
+			}
 			return nil
 		}
 		for _, i := range incomplete {
@@ -258,6 +291,11 @@ func (e *Env) PublishReleaseImages(ctx context.Context, w io.Writer, opts Publis
 	if len(stale) > 0 {
 		return fmt.Errorf("after publishing, %d tag(s) do not name the pushed image:\n  %s", len(stale), strings.Join(stale, "\n  "))
 	}
+	if opts.DigestsFile != "" {
+		if err := writeDigestsFile(opts.DigestsFile, refs); err != nil {
+			return err
+		}
+	}
 	if _, err := fmt.Fprintf(w, "\nRelease images for %s:\n", tag); err != nil {
 		return err
 	}
@@ -265,6 +303,53 @@ func (e *Env) PublishReleaseImages(ctx context.Context, w io.Writer, opts Publis
 		if _, err := fmt.Fprintln(w, ref); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// publishedDigests returns a digest reference for each of tagged, as the
+// registry resolves it: the form ko prints for an image it pushed. A tag
+// the registry does not hold is an error.
+func publishedDigests(ctx context.Context, tagged []string) ([]string, error) {
+	refs := make([]string, 0, len(tagged))
+	for _, ref := range tagged {
+		digest, err := images.RemoteDigest(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref+"@"+digest)
+	}
+	return refs, nil
+}
+
+// writeDigestsFile writes one "<sha256 hex>  <repository>" line per digest
+// reference in refs to path, creating its directory, sorted by repository,
+// in the form sha256sum writes. refs are repo/name:tag@sha256:... or
+// repo/name@sha256:..., as ko prints them.
+func writeDigestsFile(path string, refs []string) error {
+	type line struct{ repo, hex string }
+	lines := make([]line, 0, len(refs))
+	for _, ref := range refs {
+		d, err := name.NewDigest(ref)
+		if err != nil {
+			return fmt.Errorf("%s is not a digest reference: %w", ref, err)
+		}
+		algorithm, hex, ok := strings.Cut(d.DigestStr(), ":")
+		if !ok || algorithm != "sha256" {
+			return fmt.Errorf("%s is not a sha256 digest reference", ref)
+		}
+		lines = append(lines, line{repo: d.Context().Name(), hex: hex})
+	}
+	slices.SortFunc(lines, func(a, b line) int { return strings.Compare(a.repo, b.repo) })
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("while creating %s: %w", filepath.Dir(path), err)
+	}
+	var b strings.Builder
+	for _, l := range lines {
+		fmt.Fprintf(&b, "%s  %s\n", l.hex, l.repo)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		return fmt.Errorf("while writing %s: %w", path, err)
 	}
 	return nil
 }
