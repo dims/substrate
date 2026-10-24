@@ -268,6 +268,17 @@ func (a *AgentClient) ReadStderr(ctx context.Context, containerID, execID string
 	return resp.GetData(), nil
 }
 
+// GetOOMEvent blocks until the agent reports a container's cgroup killed a
+// process for exceeding its memory limit, and returns that container's id. It
+// returns an error once the connection closes, which is how a loop over it ends.
+func (a *AgentClient) GetOOMEvent(ctx context.Context) (string, error) {
+	resp := &agentpb.OOMEvent{}
+	if err := a.client.Call(ctx, "grpc.AgentService", "GetOOMEvent", &agentpb.GetOOMEventRequest{}, resp); err != nil {
+		return "", fmt.Errorf("agent GetOOMEvent: %w", err)
+	}
+	return resp.GetContainerId(), nil
+}
+
 // StatsContainer returns the guest cgroup accounting for one container, as the
 // kata-agent reads it from inside the guest. Mirrors
 // grpc.AgentService/StatsContainer.

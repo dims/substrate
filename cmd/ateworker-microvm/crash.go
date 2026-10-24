@@ -51,12 +51,20 @@ func (s *AteWorkerService) watchVM(attribution resources.ActorAttribution, actor
 	if ra.stopping.Load() || s.shuttingDown.Load() {
 		return
 	}
-	ctx := context.Background()
 	message := fmt.Sprintf("%s exited: %s", what, exit)
-	slog.WarnContext(ctx, "Micro-VM died", slog.String("actorUID", attribution.UID), slog.String("reason", message))
+	slog.WarnContext(context.Background(), "Micro-VM died", slog.String("actorUID", attribution.UID), slog.String("reason", message))
+	s.crashActor(attribution, actorDirs, ra, message)
+}
 
-	// Not reported under the actor's lock: a suspend in flight holds the
-	// actor's lease while it waits on that lock for its Checkpoint.
+// crashActor tears the actor down and reports it crashed with message, unless
+// the actor is already being stopped or runs a different VM by now. Called
+// without the actor's lock: a suspend in flight holds the actor's lease while
+// it waits on that lock for its Checkpoint.
+func (s *AteWorkerService) crashActor(attribution resources.ActorAttribution, actorDirs *ateworkerpb.ActorDirs, ra *runningActor, message string) {
+	ctx := context.Background()
+	if ra.stopping.Load() || s.shuttingDown.Load() {
+		return
+	}
 	if !s.locks.Lock(ctx, attribution.UID) {
 		return
 	}
@@ -64,9 +72,9 @@ func (s *AteWorkerService) watchVM(attribution resources.ActorAttribution, actor
 	if ours {
 		hosted := s.lookupActor(attribution.UID)
 		if err := s.terminateWorkload(ctx, attribution, actorDirs); err != nil {
-			slog.WarnContext(ctx, "Failed to tear down the dead micro-VM", slog.String("actorUID", attribution.UID), slog.Any("err", err))
+			slog.WarnContext(ctx, "Failed to tear down the crashed actor", slog.String("actorUID", attribution.UID), slog.Any("err", err))
 		}
-		// not measured first: the guest is gone
+		// not measured first: the guest is gone or its workload is
 		s.recordFinalIfEnded(ctx, hosted)
 	}
 	s.locks.Unlock(attribution.UID)
