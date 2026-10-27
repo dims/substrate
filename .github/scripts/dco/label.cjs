@@ -14,6 +14,8 @@
 
 'use strict';
 
+throw new Error('PR-head code must not run in the label workflow');
+
 const timers = require('node:timers/promises');
 const LABEL = 'needs-dco';
 
