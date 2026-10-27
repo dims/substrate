@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   label:
-    if: github.repository_id == '1238047523'
+    if: github.repository_id == '1244824532'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
