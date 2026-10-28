@@ -35,13 +35,13 @@
 set -o errexit -o nounset -o pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
-UPSTREAM_REPO='agent-substrate/substrate'
+UPSTREAM_REPO='dims/substrate'
 REPO="${GITHUB_REPOSITORY:-${UPSTREAM_REPO}}"
 SEMVER='^v[0-9]+\.[0-9]+\.[0-9]+$'
 SEMVER_PRE='^v[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$'
 # Where the upstream release workflow publishes images (KO_DOCKER_REPO in
 # .github/workflows/release.yaml).
-RELEASE_IMAGE_REPO='ghcr.io/agent-substrate/substrate'
+RELEASE_IMAGE_REPO='localhost:5000/substrate'
 
 usage() {
   echo "usage: $0 [--dry-run] <tag>" >&2

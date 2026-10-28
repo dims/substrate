@@ -56,9 +56,13 @@ concurrency:
 jobs:
   # The only job that writes to a registry.
   images:
-    if: github.repository == 'agent-substrate/substrate' && !inputs.dry_run_images
+    if: github.repository == 'dims/substrate' && !inputs.dry_run_images
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      registry:
+        image: registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
+        ports: ['5000:5000']
     permissions:
       contents: read
       packages: write
@@ -68,7 +72,7 @@ jobs:
     # Read by ate-setup publish release-images.
     env:
       VERSION: ${{ inputs.tag || github.ref_name }}
-      KO_DOCKER_REPO: ghcr.io/agent-substrate/substrate
+      KO_DOCKER_REPO: localhost:5000/substrate
       KO_DEFAULTPLATFORMS: linux/amd64,linux/arm64
       # inputs.overwrite is empty on a tag push; this makes the value explicit.
       ATE_PUBLISH_OVERWRITE: ${{ inputs.overwrite == true }}
@@ -100,11 +104,12 @@ jobs:
     - name: Set up buildx
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       with:
-        driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
-    - name: Log in to ghcr.io
-      env:
-        TOKEN: ${{ github.token }}
-      run: .github/scripts/release/ghcr-login.sh
+        driver-opts: |
+          image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+          network=host
+        buildkitd-config-inline: |
+          [registry."localhost:5000"]
+            http = true
     # Publishing replaces the digests that operators of a published release
     # install by tag, so nothing is published once the release is. This runs
     # whether or not overwrite is set: without it, an incomplete set (an image
@@ -137,6 +142,11 @@ jobs:
         name: release-images
         path: bin/release-images.txt
         if-no-files-found: error
+    # Trial only: rerun, verify, and a tamper check against the in-job registry.
+    - name: Trial checks
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: .github/scripts/release/attest-trial.sh
   # The same build and checks against a registry that exists only for the
   # duration of this job. Runs only when started manually with dry_run_images.
   images-dry-run:
@@ -222,13 +232,13 @@ jobs:
     # Built before the draft exists, so a build failure leaves no draft, as an
     # images failure does. A fork attaches no binaries, so it builds none.
     - name: Build kubectl-ate
-      if: github.repository == 'agent-substrate/substrate'
+      if: github.repository == 'dims/substrate'
       env:
         VERSION: ${{ inputs.tag || github.ref_name }}
       run: go run ./cmd/ate-setup publish release-binaries --out bin/release
     # The four binaries, not their .sha256 files.
     - name: Attest kubectl-ate
-      if: github.repository == 'agent-substrate/substrate'
+      if: github.repository == 'dims/substrate'
       uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
       with:
         subject-path: |
@@ -251,7 +261,7 @@ jobs:
     # none. Assets are replaced only while the release is a draft, so a rerun
     # never changes the files of a published release.
     - name: Attach kubectl-ate
-      if: github.repository == 'agent-substrate/substrate'
+      if: github.repository == 'dims/substrate'
       env:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ inputs.tag || github.ref_name }}
