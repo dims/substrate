@@ -38,3 +38,4 @@ if DIGESTS_FILE=bin/tamper.txt .github/scripts/release/verify-image-attestations
   exit 1
 fi
 echo "TRIAL_OK"
+# Second commit so the branch head differs from the trial tag.
