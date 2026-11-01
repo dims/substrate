@@ -72,8 +72,12 @@ func getWorkerRow(ctx context.Context, q querier, name string) (*ateapi.Worker, 
 	return out, nil
 }
 
-func (p *Persistence) GetWorker(ctx context.Context, name string) (*ateapi.Worker, error) {
-	return getWorkerRow(ctx, p.pool, name)
+func (p *Persistence) GetWorker(ctx context.Context, name string) (worker *ateapi.Worker, err error) {
+	err = retryRead(ctx, func() error {
+		worker, err = getWorkerRow(ctx, p.pool, name)
+		return err
+	})
+	return worker, err
 }
 
 // getWorkerRowForUpdate reads the worker and holds its row lock for the rest of

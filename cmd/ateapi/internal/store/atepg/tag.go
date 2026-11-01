@@ -29,9 +29,12 @@ import (
 func (p *Persistence) GetTag(ctx context.Context, tagRef resources.TagRef) (*ateapi.Tag, error) {
 	atespace, name := tagRef.Atespace, tagRef.Name
 	var protoBytes []byte
-	if err := p.pool.QueryRow(ctx, `
+	err := retryRead(ctx, func() error {
+		return p.pool.QueryRow(ctx, `
 		SELECT proto FROM tags
-		WHERE atespace = $1 AND name = $2`, atespace, name).Scan(&protoBytes); err != nil {
+		WHERE atespace = $1 AND name = $2`, atespace, name).Scan(&protoBytes)
+	})
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, store.ErrNotFound
 		}
