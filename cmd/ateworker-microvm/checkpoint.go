@@ -438,6 +438,8 @@ func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDi
 		ra.stopping.Store(true)
 	}
 
+	tStart := time.Now()
+	tAgent, tVMM, tVfsd := tStart, tStart, tStart
 	var errs []error
 	if ra != nil {
 		// Close the kata-agent client kept open for stdout/stderr forwarding. This
@@ -451,15 +453,18 @@ func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDi
 		if agent != nil {
 			_ = agent.Close()
 		}
+		tAgent = time.Now()
 
 		// Kill the CH process ateworker launched.
 		if ra.chProc != nil {
 			ra.chProc.Stop()
 		}
+		tVMM = time.Now()
 		// Kill the virtiofsd (after CH, its only client).
 		if ra.vfsdProc != nil {
 			ra.vfsdProc.Stop()
 		}
+		tVfsd = time.Now()
 	}
 
 	// Sweep any leftover per-sandbox host-side state + orphaned per-sandbox
@@ -468,6 +473,7 @@ func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDi
 	// the upper-dir removal below (removing a live overlay's upperdir would
 	// corrupt the mount rather than delete the files).
 	s.cleanupSandboxState(ctx, id)
+	tCleanup := time.Now()
 
 	// Remove the rootfs upper dir: ateworker owns it — atelet's actor-dir reset
 	// doesn't know it — and its absence is what marks a worker as holding no
@@ -475,6 +481,7 @@ func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDi
 	if err := os.RemoveAll(rootfsUpperDir(actorDirs)); err != nil {
 		slog.WarnContext(ctx, "Failed to remove rootfs upper dir", slog.String("actorUID", id), slog.Any("err", err))
 	}
+	tUpper := time.Now()
 
 	// Detach the bundle rootfs overlays composed in buildActorContainers, so
 	// atelet's bundle wipe doesn't strand live mounts in this namespace.
@@ -483,6 +490,16 @@ func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDi
 			errs = append(errs, fmt.Errorf("while unmounting bundle rootfs overlays: %w", err))
 		}
 	}
+	// Where a teardown goes, the restore phases' counterpart. The three VM
+	// phases are zero when ateworker held no running VM for the actor.
+	slog.InfoContext(ctx, "Actor teardown phases", slog.String("id", id),
+		slog.Duration("agent_close", tAgent.Sub(tStart)),
+		slog.Duration("vmm_stop", tVMM.Sub(tAgent)),
+		slog.Duration("vfsd_stop", tVfsd.Sub(tVMM)),
+		slog.Duration("sandbox_cleanup", tCleanup.Sub(tVfsd)),
+		slog.Duration("upper_rm", tUpper.Sub(tCleanup)),
+		slog.Duration("bundle_unmount", time.Since(tUpper)),
+		slog.Duration("total", time.Since(tStart)))
 	return errors.Join(errs...)
 }
 
@@ -536,18 +553,26 @@ func (s *AteWorkerService) endPreviousActivation(ctx context.Context, actorUID s
 }
 
 func (s *AteWorkerService) terminateWorkload(ctx context.Context, actor resources.ActorAttribution, actorDirs *ateworkerpb.ActorDirs) error {
+	tStart := time.Now()
 	var errs []error
 	if err := s.tunnel.Deactivate(ctx, actor); err != nil {
 		errs = append(errs, fmt.Errorf("while deactivating actor networking: %w", err))
 	}
+	tDeactivated := time.Now()
 
 	actorUID := actor.UID
 	if err := s.teardownActor(ctx, actorUID, actorDirs, s.runningVM(actorUID)); err != nil {
 		errs = append(errs, fmt.Errorf("while tearing down actor: %w", err))
 	}
+	tTeardown := time.Now()
 	// Remove attribution after teardown; a failed checkpoint may leave the VM running.
 	if err := s.unhostActor(ctx, actorUID); err != nil {
 		errs = append(errs, fmt.Errorf("while cleaning up actor network: %w", err))
 	}
+	slog.InfoContext(ctx, "Actor terminate phases", slog.String("id", actorUID),
+		slog.Duration("deactivate_egress", tDeactivated.Sub(tStart)),
+		slog.Duration("teardown", tTeardown.Sub(tDeactivated)),
+		slog.Duration("unhost_net", time.Since(tTeardown)),
+		slog.Duration("total", time.Since(tStart)))
 	return errors.Join(errs...)
 }
