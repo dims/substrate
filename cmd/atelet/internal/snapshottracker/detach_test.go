@@ -626,6 +626,9 @@ func TestTrackerDetachUploadTimeoutIsUnavailable(t *testing.T) {
 	}
 	if got := uuidOf(tr.State(trackedActorUID).GetLatestLocal()); got != "s1" {
 		t.Errorf("latest_local = %q after the timed-out upload, want s1 kept", got)
+	}
+}
+
 // The uploads of Detach calls run at most as many at once as there are detach
 // workers. When a node fills up, every resume of an actor on it detaches first,
 // and uploads that all run at once time each other out.
